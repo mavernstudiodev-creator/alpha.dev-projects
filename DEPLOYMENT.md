@@ -19,3 +19,11 @@ GitHub Pages serves static files and cannot run the FastAPI service. Until the A
 
 Then set the GitHub repository Actions variable `VITE_API_URL` to that backend's public origin and rerun the Pages workflow.
 
+## Temporary backend demo on Render
+
+The root `render.yaml` defines a free Render web service for the FastAPI backend. To create it, sign in to Render, choose **New → Blueprint**, connect `mavernstudiodev-creator/alpha.dev-projects` on `main`, and deploy the blueprint. Enter `NVIDIA_API_KEY` in Render's secret prompt (or leave it blank to use the local grounded assistant mode). Do not put the NVIDIA key in GitHub, the frontend, or this file.
+
+After the service deploys, open `https://<your-service>.onrender.com/api/health` and confirm it reports `healthy`. In GitHub, open **Settings → Secrets and variables → Actions → Variables**, create a repository variable named `VITE_API_URL`, and set its value to the service origin, such as `https://citeverify-api.onrender.com` (do not append `/api/v1`). Then run **Actions → Deploy CiteVerify frontend to GitHub Pages → Run workflow** so the frontend is rebuilt with the API URL. The `CORS_ORIGINS` setting in `render.yaml` already permits the GitHub Pages site origin.
+
+This free setup is for demos and testing. Render free web services sleep after 15 minutes without inbound traffic and have an ephemeral filesystem; uploaded PDFs and the SQLite database are lost when the service sleeps, restarts, or redeploys. Use paid persistent storage or external durable database/object storage before relying on it for ongoing work.
+

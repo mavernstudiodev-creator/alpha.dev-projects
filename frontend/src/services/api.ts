@@ -14,6 +14,18 @@ const HEALTH_URL = configuredApiUrl
   ? `${configuredApiUrl.replace(/\/api\/v1$/, '')}/api/health`
   : '/api/health';
 
+function missingProductionApiMessage(): string | null {
+  if (
+    !configuredApiUrl &&
+    import.meta.env.PROD &&
+    typeof window !== 'undefined' &&
+    window.location.hostname.endsWith('github.io')
+  ) {
+    return 'The live website is not connected to its FastAPI backend yet. Set the GitHub Actions variable VITE_API_URL to the deployed API origin, then redeploy the site.';
+  }
+  return null;
+}
+
 export interface DocumentStatus {
   document_id: string;
   filename: string;
@@ -77,6 +89,9 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const missingApiMessage = missingProductionApiMessage();
+  if (missingApiMessage) throw new ApiError(missingApiMessage, 0);
+
   let response: Response;
   try {
     response = await fetch(`${API_PREFIX}${path}`, {
@@ -108,6 +123,11 @@ class VerificationService {
   private backendAvailable: boolean | null = null;
 
   async checkHealth(): Promise<{ available: boolean; data?: BackendHealth }> {
+    if (missingProductionApiMessage()) {
+      this.backendAvailable = false;
+      return { available: false };
+    }
+
     try {
       const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error('Health check failed');
@@ -278,3 +298,4 @@ class VerificationService {
 }
 
 export const apiService = new VerificationService();
+
