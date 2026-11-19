@@ -41,11 +41,11 @@ CLAIM_SIGNAL_REGEX = re.compile("|".join(CLAIM_SIGNAL_KEYWORDS), re.IGNORECASE)
 
 # Keep bibliography content and imperative citation-checking instructions out of claim mining.
 BIBLIOGRAPHY_HEADER_REGEX = re.compile(
-    r"(?im)^\\s*(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:references|bibliography|works\\s+cited|literature\\s+cited)\\s*$"
+    r"(?im)^\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:references|bibliography|works\s+cited|literature\s+cited)\s*$"
 )
 INSTRUCTIONAL_SENTENCE_REGEX = re.compile(
-    r"\\b(?:find|detect|identify|extract|map|search for|look for|list|provide|write|enter|add|upload|select|click|complete|check|verify)\\s+(?:the\\s+)?(?:citations?|references?|bibliography|claim list|reference list)\\b|"
-    r"\\b(?:citation detection|citation mapping|citation extraction|reference list)\\b[^.!?]{0,120}\\b(?:such as|e\\.g\\.)\\b",
+    r"\b(?:find|detect|identify|extract|map|search for|look for|list|provide|write|enter|add|upload|select|click|complete|check|verify)\s+(?:the\s+)?(?:citations?|references?|bibliography|claim list|reference list)\b|"
+    r"\b(?:citation detection|citation mapping|citation extraction|reference list)\b[^.!?]{0,120}\b(?:such as|e\.g\.)\b",
     re.IGNORECASE,
 )
 
@@ -107,22 +107,22 @@ class ClaimMiner:
                 if not CLAIM_SIGNAL_REGEX.search(clean_s) or INSTRUCTIONAL_SENTENCE_REGEX.search(clean_s):
                     continue
 
-                normalized = re.sub(r"\\W+", " ", clean_s.casefold()).strip()
+                normalized = re.sub(r"\W+", " ", clean_s.casefold()).strip()
                 deduplication_key = (page.page_num, normalized, tuple(unique_keys))
                 if deduplication_key in seen_claims:
                     continue
                 seen_claims.add(deduplication_key)
 
                 claim_id = f"CLM-{page.page_num}-{uuid.uuid4().hex[:6].upper()}"
-                    statement = self._clean_statement(clean_s)
+                statement = self._clean_statement(clean_s)
 
-                    claims.append(Claim(
-                        claim_id=claim_id,
-                        statement=statement,
-                        page_number=page.page_num,
-                        context_sentence=clean_s,
-                        citation_keys=unique_keys,
-                    ))
+                claims.append(Claim(
+                    claim_id=claim_id,
+                    statement=statement,
+                    page_number=page.page_num,
+                    context_sentence=clean_s,
+                    citation_keys=unique_keys,
+                ))
 
         return claims
 
