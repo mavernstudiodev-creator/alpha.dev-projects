@@ -1,5 +1,6 @@
 """
 CiteVerify FastAPI Application Entrypoint
+Full-Stack Scientific Claim and Citation Verification Engine with NVIDIA AI Research Assistant.
 """
 
 from fastapi import FastAPI
@@ -8,14 +9,17 @@ from contextlib import asynccontextmanager
 import httpx
 
 from app.core.config import settings
-from app.core.database import engine, Base
+from app.core.database import engine, Base, run_schema_migrations
 from app.api.v1 import api_router
 from research_engine import __version__ as engine_version
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB schemas on startup
+    # Run safe schema migrations for existing tables
+    run_schema_migrations(engine)
+
+    # Initialize all DB schemas and models on startup
     Base.metadata.create_all(bind=engine)
 
     # Initialize shared connection pool for the backend service
@@ -40,7 +44,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="Scientific Claim and Citation Verification Engine (Hackathon Edition)",
+    description="Scientific Claim & Citation Verification Engine with NVIDIA Nemotron AI Research Assistant",
     lifespan=lifespan,
 )
 
@@ -77,5 +81,14 @@ def health_check():
             "contradictory",
             "possibly_outdated",
             "insufficient_evidence"
-        ]
+        ],
+        "ai_assistant": {
+            "provider": "NVIDIA NIM / Nemotron",
+            "model": settings.NVIDIA_MODEL,
+            "status": "active" if settings.NVIDIA_API_KEY else "local_grounded_mode",
+        },
+        "background_processing": {
+            "durable_jobs_enabled": True,
+            "pdf_cache_enabled": True,
+        },
     }

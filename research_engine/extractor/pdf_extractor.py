@@ -1,6 +1,7 @@
 """
 PDF Extractor using PyMuPDF (fitz)
 Extracts page-by-page structured text, bounding boxes, and section boundaries.
+Safely detects empty, corrupt, and scanned (image-only) PDFs.
 """
 
 import os
@@ -12,6 +13,16 @@ import pymupdf as fitz
 logger = logging.getLogger(__name__)
 
 
+class PDFExtractionError(Exception):
+    """Raised when PDF extraction fails due to corruption, invalid format, or empty file."""
+    pass
+
+
+class ScannedPDFError(PDFExtractionError):
+    """Raised when a PDF contains no extractable text (e.g. scanned image-only document)."""
+    pass
+
+
 class ExtractedPage:
     def __init__(self, page_num: int, text: str, blocks: List[Dict[str, Any]]):
         self.page_num = page_num
@@ -20,11 +31,12 @@ class ExtractedPage:
 
 
 class PDFDocumentStructure:
-    def __init__(self, filename: str, total_pages: int, pages: List[ExtractedPage], full_text: str):
+    def __init__(self, filename: str, total_pages: int, pages: List[ExtractedPage], full_text: str, is_scanned: bool = False):
         self.filename = filename
         self.total_pages = total_pages
         self.pages = pages
         self.full_text = full_text
+        self.is_scanned = is_scanned
         self.bibliography_text: Optional[str] = None
         self.bibliography_start_page: Optional[int] = None
 
@@ -39,57 +51,80 @@ class PDFExtractor:
     )
 
     def extract_pdf(self, file_path: str) -> PDFDocumentStructure:
-        """Parse a local PDF file and extract pages and sections."""
+        """Parse a local PDF file and extract pages and sections. Safely validates PDF integrity."""
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"PDF file not found: {file_path}")
 
-        doc = fitz.open(file_path)
-        total_pages = len(doc)
-        pages: List[ExtractedPage] = []
-        full_text_parts: List[str] = []
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            raise PDFExtractionError(f"PDF file is completely empty (0 bytes): {os.path.basename(file_path)}")
 
-        bib_start_page = None
-        bib_text_lines: List[str] = []
-        in_bibliography = False
+        try:
+            doc = fitz.open(file_path)
+        except Exception as e:
+            raise PDFExtractionError(f"Failed to open corrupted or invalid PDF file: {str(e)}")
 
-        for page_idx in range(total_pages):
-            page = doc[page_idx]
-            page_num = page_idx + 1
-            page_text = page.get_text("text")
-            full_text_parts.append(page_text)
+        try:
+            total_pages = len(doc)
+            if total_pages == 0:
+                raise PDFExtractionError(f"PDF document contains 0 pages: {os.path.basename(file_path)}")
 
-            blocks = page.get_text("blocks")
-            block_dicts = []
-            for b in blocks:
-                b_text = b[4].strip() if len(b) > 4 else ""
-                block_dicts.append({
-                    "bbox": [b[0], b[1], b[2], b[3]],
-                    "text": b_text,
-                    "type": b[6] if len(b) > 6 else 0,
-                })
+            pages: List[ExtractedPage] = []
+            full_text_parts: List[str] = []
 
-                if not in_bibliography:
-                    match = self.BIB_HEADER_LINE_REGEX.search(b_text)
-                    if match:
-                        in_bibliography = True
-                        bib_start_page = page_num
-                        # Content after header in the same block is bibliography
-                        after_header = b_text[match.end():].strip()
-                        if after_header:
-                            bib_text_lines.append(after_header)
-                elif in_bibliography:
-                    bib_text_lines.append(b_text)
+            bib_start_page = None
+            bib_text_lines: List[str] = []
+            in_bibliography = False
 
-            pages.append(ExtractedPage(page_num=page_num, text=page_text, blocks=block_dicts))
+            for page_idx in range(total_pages):
+                page = doc[page_idx]
+                page_num = page_idx + 1
+                page_text = page.get_text("text") or ""
+                full_text_parts.append(page_text)
 
-        doc.close()
+                blocks = page.get_text("blocks") or []
+                block_dicts = []
+                for b in blocks:
+                    b_text = b[4].strip() if len(b) > 4 else ""
+                    block_dicts.append({
+                        "bbox": [b[0], b[1], b[2], b[3]],
+                        "text": b_text,
+                        "type": b[6] if len(b) > 6 else 0,
+                    })
 
-        full_text = "\n\n".join(full_text_parts)
+                    if not in_bibliography:
+                        match = self.BIB_HEADER_LINE_REGEX.search(b_text)
+                        if match:
+                            in_bibliography = True
+                            bib_start_page = page_num
+                            # Content after header in the same block is bibliography
+                            after_header = b_text[match.end():].strip()
+                            if after_header:
+                                bib_text_lines.append(after_header)
+                    elif in_bibliography:
+                        bib_text_lines.append(b_text)
+
+                pages.append(ExtractedPage(page_num=page_num, text=page_text, blocks=block_dicts))
+
+        finally:
+            doc.close()
+
+        full_text = "\n\n".join(full_text_parts).strip()
+
+        # Check for scanned (image-only) document where text extraction yields no readable text
+        alphanumeric_count = sum(1 for c in full_text if c.isalnum())
+        if alphanumeric_count < 30:
+            raise ScannedPDFError(
+                f"Document '{os.path.basename(file_path)}' appears to be a scanned image or contains no extractable text. "
+                "Optical Character Recognition (OCR) is required to verify scanned PDFs."
+            )
+
         doc_structure = PDFDocumentStructure(
             filename=os.path.basename(file_path),
             total_pages=total_pages,
             pages=pages,
             full_text=full_text,
+            is_scanned=False,
         )
 
         if in_bibliography and bib_text_lines:

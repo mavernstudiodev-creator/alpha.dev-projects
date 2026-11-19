@@ -2,9 +2,10 @@
 MetaResolver — Unified Academic Discovery Engine
 Orchestrates queries across Crossref, OpenAlex, Semantic Scholar, Europe PMC, and arXiv.
 Resolves missing metadata, locates Open-Access sources, and enforces anti-hallucination protocols.
-Supports connection-pooled reusable HTTP clients.
+Supports connection-pooled reusable HTTP clients and bounded multi-provider search.
 """
 
+import asyncio
 import logging
 from typing import Optional, Dict, Any, List
 import httpx
@@ -161,6 +162,38 @@ class MetaResolver:
             self._doi_cache[clean_doi] = work
 
         return work
+
+    async def search_all_providers(
+        self,
+        query: str,
+        limit_per_provider: int = 3,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> List[AcademicWork]:
+        """Search multiple academic providers concurrently with deduplication."""
+        query_clean = query.strip()
+        if not query_clean:
+            return []
+
+        tasks = [
+            self.openalex.search_by_title(query_clean, client=client),
+            self.europe_pmc.search_by_title(query_clean, limit=limit_per_provider, client=client),
+            self.arxiv.search_by_title(query_clean, max_results=limit_per_provider, client=client),
+            self.semantic_scholar.search_by_title(query_clean, limit=limit_per_provider, client=client),
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        deduped: Dict[str, AcademicWork] = {}
+
+        for res in results:
+            if isinstance(res, list):
+                for item in res:
+                    if isinstance(item, AcademicWork):
+                        # Key by DOI or normalized title
+                        key = item.doi.lower().strip() if item.doi else "".join(c for c in item.title.lower() if c.isalnum())
+                        if key and key not in deduped:
+                            deduped[key] = item
+
+        return list(deduped.values())
 
     def _is_title_match(self, t1: str, t2: str, threshold: float = 0.70) -> bool:
         """

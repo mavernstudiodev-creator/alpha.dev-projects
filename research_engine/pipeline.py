@@ -7,11 +7,15 @@ Optimized with:
 - High-precision time.perf_counter() stage-by-stage instrumentation.
 - Connection-pooled reusable HTTP client across all academic APIs and evidence harvesting.
 - Per-verification job research PDF caching for deduplicated downloads.
+- Bounded concurrency for parallel reference resolution.
+- Asynchronous offload for blocking PDF extraction.
+- Optional progress callback hook for background job tracking.
 """
 
 import time
+import asyncio
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Any
 import httpx
 from pydantic import BaseModel, Field
 
@@ -77,6 +81,7 @@ class VerificationPipeline:
         file_path: str,
         document_id: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
+        progress_callback: Optional[Callable[[str, int, str], Any]] = None,
     ) -> DocumentVerificationReport:
         """Run the complete end-to-end verification workflow on an uploaded PDF with stage instrumentation."""
         pipeline_start = time.perf_counter()
@@ -84,13 +89,24 @@ class VerificationPipeline:
 
         logger.info("[%s] Starting CiteVerify verification pipeline for: %s", doc_id, file_path)
 
-        # Stage 1: Extract PDF layout and text
+        async def _notify(stage: str, percent: int, msg: str):
+            if progress_callback:
+                try:
+                    res = progress_callback(stage, percent, msg)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as e:
+                    logger.debug("[%s] Progress callback exception: %s", doc_id, e)
+
+        # Stage 1: Extract PDF layout and text (offloaded to thread to avoid blocking event loop)
+        await _notify("pdf_extraction", 15, "Extracting PDF text and document structure")
         t0 = time.perf_counter()
-        doc_struct: PDFDocumentStructure = self.extractor.extract_pdf(file_path)
+        doc_struct: PDFDocumentStructure = await asyncio.to_thread(self.extractor.extract_pdf, file_path)
         t_pdf_extract = time.perf_counter() - t0
         logger.info("[%s] PDF layout extracted (%d pages) in %.2f ms", doc_id, doc_struct.total_pages, t_pdf_extract * 1000)
 
         # Stage 2: Parse Bibliography
+        await _notify("bibliography_parsing", 30, "Parsing bibliographic entries")
         t0 = time.perf_counter()
         bib_entries: List[BibEntry] = []
         if doc_struct.bibliography_text:
@@ -101,6 +117,7 @@ class VerificationPipeline:
         bib_map: Dict[str, BibEntry] = {b.key: b for b in bib_entries}
 
         # Stage 3: Mine scientific claims
+        await _notify("claim_mining", 45, "Mining scientific propositions and citation callouts")
         t0 = time.perf_counter()
         bib_start_page = doc_struct.bibliography_start_page or (doc_struct.total_pages + 1)
         claims: List[Claim] = self.claim_miner.extract_claims_from_pages(doc_struct.pages, bib_start_page)
@@ -120,6 +137,7 @@ class VerificationPipeline:
                 t_pdf_extract=t_pdf_extract,
                 t_bib_parse=t_bib_parse,
                 t_claim_mine=t_claim_mine,
+                progress_notify=_notify,
             )
         else:
             limits = httpx.Limits(
@@ -139,6 +157,7 @@ class VerificationPipeline:
                     t_pdf_extract=t_pdf_extract,
                     t_bib_parse=t_bib_parse,
                     t_claim_mine=t_claim_mine,
+                    progress_notify=_notify,
                 )
 
     async def _execute_verification_workflow(
@@ -153,21 +172,41 @@ class VerificationPipeline:
         t_pdf_extract: float,
         t_bib_parse: float,
         t_claim_mine: float,
+        progress_notify: Optional[Callable[[str, int, str], Any]] = None,
     ) -> DocumentVerificationReport:
         """Internal execution helper sharing the pooled HTTP client and dedicated PDF cache."""
-        # Stage 4: Resolve cited references against Academic APIs
+        async def _notify(stage: str, percent: int, msg: str):
+            if progress_notify:
+                await progress_notify(stage, percent, msg)
+
+        # Stage 4: Resolve cited references against Academic APIs with bounded concurrency
+        await _notify("citation_resolution", 65, "Resolving cited papers across Crossref, OpenAlex, Semantic Scholar, Europe PMC, and arXiv")
         t0 = time.perf_counter()
         referenced_keys = set()
         for c in claims:
             referenced_keys.update(c.citation_keys)
 
         resolved_works_map: Dict[str, AcademicWork] = {}
-        for key in referenced_keys:
-            if key in bib_map:
-                entry = bib_map[key]
-                resolved = await self.resolver.resolve_bib_entry(entry, client=http_client)
-                if resolved:
-                    resolved_works_map[key] = resolved
+        sem = asyncio.Semaphore(5)
+
+        async def _resolve_one(k: str):
+            if k in bib_map:
+                entry = bib_map[k]
+                async with sem:
+                    try:
+                        resolved = await self.resolver.resolve_bib_entry(entry, client=http_client)
+                        return k, resolved
+                    except Exception as e:
+                        logger.warning("[%s] Failed resolving citation [%s]: %s", doc_id, k, e)
+                        return k, None
+            return k, None
+
+        tasks = [_resolve_one(k) for k in referenced_keys if k in bib_map]
+        if tasks:
+            results_pairs = await asyncio.gather(*tasks, return_exceptions=True)
+            for pair in results_pairs:
+                if isinstance(pair, tuple) and pair[1] is not None:
+                    resolved_works_map[pair[0]] = pair[1]
 
         t_citation_resolve = time.perf_counter() - t0
         logger.info(
@@ -179,7 +218,7 @@ class VerificationPipeline:
         )
 
         # Stage 5: Harvest Evidence and Evaluate Claims
-        # Dedicated per-verification-job PDF cache to deduplicate downloads across claims
+        await _notify("evidence_harvesting", 80, "Harvesting evidence passages and matching source texts")
         job_pdf_cache = ResearchPdfCache(max_entries=50)
 
         results: List[VerificationResult] = []
@@ -232,6 +271,7 @@ class VerificationPipeline:
             elif result.status == VerificationStatus.INSUFFICIENT_EVIDENCE:
                 summary.insufficient_evidence += 1
 
+        await _notify("verdict_evaluation", 95, "Synthesizing claim verdicts and evidence provenance")
         t_pipeline_total = time.perf_counter() - pipeline_start
         summary.processing_time_seconds = round(t_pipeline_total, 2)
 
@@ -255,6 +295,8 @@ class VerificationPipeline:
             t_verdict_eval * 1000,
             t_pipeline_total,
         )
+
+        await _notify("completed", 100, "Verification pipeline successfully completed")
 
         return DocumentVerificationReport(
             document_id=doc_id,
