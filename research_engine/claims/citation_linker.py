@@ -138,4 +138,4 @@ class CitationLinker:
             elif part.isdigit():
                 keys.append(part)
 
-        return sorted(list(set(keys)), key=lambda x: int(x) if x.isdigit() else x)
+        return sorted(set(keys), key=lambda value: (0, int(value)) if value.isdigit() else (1, value.casefold()))

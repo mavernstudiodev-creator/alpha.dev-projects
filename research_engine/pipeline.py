@@ -253,9 +253,26 @@ class VerificationPipeline:
         job_pdf_cache = ResearchPdfCache(max_entries=50)
 
         results: List[VerificationResult] = []
+        # This metric counts distinct in-text citation keys, not bibliography
+        # entries. Parse the body directly so uncited sentences do not inflate
+        # claim counts and references without callouts are reported separately.
+        bibliography_page = doc_struct.bibliography_start_page or (doc_struct.total_pages + 1)
+        inline_citation_keys: Set[str] = set()
+        for page in doc_struct.pages:
+            if page.page_num > bibliography_page:
+                continue
+            page_text = page.text
+            if page.page_num == bibliography_page:
+                bibliography_heading = self.extractor.BIB_HEADER_LINE_REGEX.search(page_text)
+                if not bibliography_heading:
+                    continue
+                page_text = page_text[:bibliography_heading.start()]
+            for marker in self.claim_miner.citation_linker.find_citations_in_text(page_text, page_number=page.page_num):
+                inline_citation_keys.update(marker.keys)
+
         summary = VerificationSummary(
             total_claims=len(claims),
-            total_citations_found=len(bib_entries),
+            total_citations_found=len(inline_citation_keys),
             total_citations_resolved=len(resolved_works_map),
         )
 

@@ -39,6 +39,16 @@ CLAIM_SIGNAL_KEYWORDS = [
 
 CLAIM_SIGNAL_REGEX = re.compile("|".join(CLAIM_SIGNAL_KEYWORDS), re.IGNORECASE)
 
+# Keep bibliography content and imperative citation-checking instructions out of claim mining.
+BIBLIOGRAPHY_HEADER_REGEX = re.compile(
+    r"(?im)^\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:references|bibliography|works\s+cited|literature\s+cited)\s*$"
+)
+INSTRUCTIONAL_SENTENCE_REGEX = re.compile(
+    r"\b(?:find|detect|identify|extract|map|search for|look for|list|provide|write|enter|add|upload|select|click|complete|check|verify)\s+(?:the\s+)?(?:citations?|references?|bibliography|claim list|reference list)\b|"
+    r"\b(?:citation detection|citation mapping|citation extraction|reference list)\b[^.!?]{0,120}\b(?:such as|e\.g\.)\b",
+    re.IGNORECASE,
+)
+
 # Strips leading section titles like "1. Introduction", "2. Methodology", "Abstract"
 SECTION_PREFIX_REGEX = re.compile(
     r"^(?:(?:\d+\.?\s*)?(?:abstract|introduction|background|methodology|methods|experiments|results|discussion|related\s+work|conclusion)\s+)+",
@@ -58,12 +68,19 @@ class ClaimMiner:
         that cite bibliographic references.
         """
         claims: List[Claim] = []
+        seen_claims = set()
 
         for page in pages:
-            if page.page_num >= bib_start_page:
+            if page.page_num > bib_start_page:
                 continue
 
             text = page.text
+            if page.page_num == bib_start_page:
+                bibliography_heading = BIBLIOGRAPHY_HEADER_REGEX.search(text)
+                if not bibliography_heading:
+                    continue
+                text = text[:bibliography_heading.start()]
+
             sentences = self._split_into_sentences(text)
 
             for sentence in sentences:
@@ -78,23 +95,34 @@ class ClaimMiner:
                 all_keys: List[str] = []
                 for m in markers:
                     all_keys.extend(m.keys)
-                unique_keys = sorted(list(set(all_keys)), key=lambda x: int(x) if x.isdigit() else x)
+                unique_keys = sorted(
+                    set(all_keys),
+                    key=lambda value: (0, int(value)) if value.isdigit() else (1, value.casefold()),
+                )
 
                 if not unique_keys:
                     continue
 
-                is_claim = bool(CLAIM_SIGNAL_REGEX.search(clean_s))
-                if is_claim or len(clean_s) > 35:
-                    claim_id = f"CLM-{page.page_num}-{uuid.uuid4().hex[:6].upper()}"
-                    statement = self._clean_statement(clean_s)
+                # Citation examples and user instructions are not scientific propositions.
+                if not CLAIM_SIGNAL_REGEX.search(clean_s) or INSTRUCTIONAL_SENTENCE_REGEX.search(clean_s):
+                    continue
 
-                    claims.append(Claim(
-                        claim_id=claim_id,
-                        statement=statement,
-                        page_number=page.page_num,
-                        context_sentence=clean_s,
-                        citation_keys=unique_keys,
-                    ))
+                normalized = re.sub(r"\W+", " ", clean_s.casefold()).strip()
+                deduplication_key = (page.page_num, normalized, tuple(unique_keys))
+                if deduplication_key in seen_claims:
+                    continue
+                seen_claims.add(deduplication_key)
+
+                claim_id = f"CLM-{page.page_num}-{uuid.uuid4().hex[:6].upper()}"
+                statement = self._clean_statement(clean_s)
+
+                claims.append(Claim(
+                    claim_id=claim_id,
+                    statement=statement,
+                    page_number=page.page_num,
+                    context_sentence=clean_s,
+                    citation_keys=unique_keys,
+                ))
 
         return claims
 

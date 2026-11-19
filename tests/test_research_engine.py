@@ -4,9 +4,14 @@ Tests CitationLinker, BibliographyParser, and the full VerificationPipeline.
 """
 
 import pytest
-from research_engine.pipeline import VerificationPipeline
+import pymupdf as fitz
+from research_engine.pipeline import VerificationPipeline, DocumentVerificationReport, VerificationSummary
+from app.services.report_generator import ReportGenerator
+from research_engine.core.models import EvidencePassage, EvidenceType, VerificationResult
 from research_engine.claims.citation_linker import CitationLinker
 from research_engine.bibliography.parser import BibliographyParser
+from research_engine.claims.claim_miner import ClaimMiner
+from research_engine.extractor.pdf_extractor import ExtractedPage
 from research_engine.core.models import VerificationStatus
 
 
@@ -43,6 +48,29 @@ def test_citation_linker_in_text():
     assert markers[1].keys == ["2", "4", "5"], f"Expected ['2', '4', '5'], got {markers[1].keys}"
     assert markers[0].page_number == 1
     assert "Prior works" in markers[0].context_sentence
+
+
+def test_claim_miner_rejects_citation_instructions_and_keeps_body_before_references():
+    miner = ClaimMiner()
+    instruction = ExtractedPage(
+        page_num=1,
+        text="CITATION DETECTION & MAPPING Find citations such as [1], (Author, Year) and the reference list.",
+        blocks=[],
+    )
+    assert miner.extract_claims_from_pages([instruction]) == []
+
+    mixed_page = ExtractedPage(
+        page_num=1,
+        text=(
+            "The results demonstrate that the proposed method improves recognition accuracy by 12% [1].\n"
+            "References\n[1] Example, A. A relevant source. 2024."
+        ),
+        blocks=[],
+    )
+    claims = miner.extract_claims_from_pages([mixed_page], bib_start_page=1)
+    assert len(claims) == 1
+    assert "improves recognition accuracy by 12%" in claims[0].statement
+    assert claims[0].citation_keys == ["1"]
 
 
 def test_bibliography_parser_metadata_extraction():
@@ -101,3 +129,50 @@ async def test_verification_pipeline_process_pdf(sample_pdf_path):
             assert ev.source_database, "Evidence passage missing source database"
             assert ev.passage_text, "Evidence passage text is empty"
             assert ev.evidence_type in ["full_text", "abstract_only", "metadata_only"]
+
+
+def test_pdf_report_wraps_long_claims_and_evidence_across_pages():
+    long_claim = ("The evaluated study reports a measurable improvement in the tested method. " * 24).strip()
+    long_explanation = ("No accessible source directly confirms every detail in this result. " * 18).strip()
+    evidence_text = ("This evidence passage is retained in the report with its source provenance. " * 300) + "EVIDENCE-END-MARKER-123"
+    report = DocumentVerificationReport(
+        document_id="DOC-REPORT-TEST",
+        filename="long-evidence-study.pdf",
+        total_pages=4,
+        summary=VerificationSummary(
+            total_claims=1,
+            insufficient_evidence=1,
+            total_citations_found=1,
+            total_citations_resolved=1,
+        ),
+        results=[
+            VerificationResult(
+                claim_id="CLM-1-TEST",
+                claim_statement=long_claim,
+                status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+                confidence_score=0.2,
+                explanation=long_explanation,
+                evidence_items=[
+                    EvidencePassage(
+                        passage_id="PASS-REPORT-TEST",
+                        source_work_title="Evidence provenance test source",
+                        source_database="openalex",
+                        source_doi="10.1234/report-test",
+                        source_url="https://example.org/source",
+                        evidence_type=EvidenceType.FULL_TEXT,
+                        page_number=3,
+                        passage_text=evidence_text,
+                        relevance_score=0.4,
+                    )
+                ],
+            )
+        ],
+    )
+
+    pdf_bytes = ReportGenerator.generate_pdf(report)
+    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+    extracted_text = "\n".join(page.get_text("text") for page in pdf)
+    assert len(pdf) > 1
+    assert "Claim verification and evidence" in extracted_text
+    assert "Evidence provenance test source" in extracted_text
+    assert "EVIDENCE-END-MARKER-123" in extracted_text

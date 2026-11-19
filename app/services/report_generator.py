@@ -31,8 +31,9 @@ class ReportGenerator:
             f"- **Contradictory Claims:** {report.summary.contradictory}",
             f"- **Possibly Outdated Claims:** {report.summary.possibly_outdated}",
             f"- **Insufficient Evidence (Abstentions):** {report.summary.insufficient_evidence}",
-            f"- **Citations Found in Document:** {report.summary.total_citations_found}",
-            f"- **Citations Resolved in Academic Databases:** {report.summary.total_citations_resolved}",
+            f"- **Distinct in-text citation keys detected:** {report.summary.total_citations_found}",
+            f"- **Bibliographic references parsed:** {len(report.bibliography)}",
+            f"- **Citation references resolved in academic databases:** {report.summary.total_citations_resolved}",
             f"- **Processing Time:** {report.summary.processing_time_seconds:.2f} seconds",
             "",
             "---",
@@ -86,115 +87,209 @@ class ReportGenerator:
 
     @staticmethod
     def generate_pdf(report: DocumentVerificationReport) -> bytes:
-        """Generate a professional PDF verification report using PyMuPDF (fitz)."""
+        """Create a paginated, readable PDF with wrapped claim and evidence text."""
         doc = fitz.open()
+        margin = 46
+        blue = (0.12, 0.27, 0.52)
+        muted = (0.32, 0.36, 0.42)
+        bottom = 786
 
-        # Page 1: Header, Summary, and Metadata
-        page = doc.new_page()
-        width = page.rect.width
-        margin = 45
+        def safe_text(value: Any) -> str:
+            text = str(value or "")
+            return text.translate(str.maketrans({
+                "“": '"', "”": '"', "‘": "'", "’": "'",
+                "–": "-", "—": "-", "•": "-", "…": "...",
+            }))
 
-        # Header Box
-        header_rect = fitz.Rect(margin, 35, width - margin, 90)
-        page.draw_rect(header_rect, color=(0.1, 0.25, 0.5), fill=(0.93, 0.96, 1.0), width=1.5)
-        page.insert_text(fitz.Point(margin + 15, 60), "CiteVerify Scientific Audit Report", fontsize=16, fontname="helv", color=(0.1, 0.25, 0.5))
-        page.insert_text(fitz.Point(margin + 15, 78), f"Automated Claim & Citation Verification Engine", fontsize=10, fontname="helv", color=(0.3, 0.3, 0.3))
-
-        # Metadata Section
-        y = 115
-        page.insert_text(fitz.Point(margin, y), f"Document ID: {report.document_id}", fontsize=10, fontname="helv")
-        y += 18
-        page.insert_text(fitz.Point(margin, y), f"Filename: {report.filename} ({report.total_pages} pages)", fontsize=10, fontname="helv")
-        y += 18
-        page.insert_text(fitz.Point(margin, y), f"Audit Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", fontsize=10, fontname="helv")
-        y += 18
-        page.insert_text(fitz.Point(margin, y), f"Processing Duration: {report.summary.processing_time_seconds:.2f}s", fontsize=10, fontname="helv")
-
-        # Summary Metrics Box
-        y += 28
-        summary_rect = fitz.Rect(margin, y, width - margin, y + 105)
-        page.draw_rect(summary_rect, color=(0.7, 0.7, 0.7), fill=(0.98, 0.98, 0.98), width=1.0)
-        page.insert_text(fitz.Point(margin + 10, y + 20), "Executive Verification Summary", fontsize=12, fontname="helv", color=(0.1, 0.2, 0.4))
-        
-        col1_x = margin + 15
-        col2_x = margin + 260
-        sy = y + 42
-        page.insert_text(fitz.Point(col1_x, sy), f"- Total Claims Evaluated: {report.summary.total_claims}", fontsize=9, fontname="helv")
-        page.insert_text(fitz.Point(col2_x, sy), f"- Citations Found: {report.summary.total_citations_found}", fontsize=9, fontname="helv")
-        sy += 16
-        page.insert_text(fitz.Point(col1_x, sy), f"- Supported: {report.summary.supported}", fontsize=9, fontname="helv", color=(0.1, 0.5, 0.1))
-        page.insert_text(fitz.Point(col2_x, sy), f"- Resolved Citations: {report.summary.total_citations_resolved}", fontsize=9, fontname="helv")
-        sy += 16
-        page.insert_text(fitz.Point(col1_x, sy), f"- Partially Supported: {report.summary.partially_supported}", fontsize=9, fontname="helv", color=(0.7, 0.4, 0.0))
-        page.insert_text(fitz.Point(col2_x, sy), f"- Unsupported: {report.summary.unsupported}", fontsize=9, fontname="helv", color=(0.8, 0.1, 0.1))
-        sy += 16
-        page.insert_text(fitz.Point(col1_x, sy), f"- Contradictory: {report.summary.contradictory}", fontsize=9, fontname="helv", color=(0.6, 0.0, 0.2))
-        page.insert_text(fitz.Point(col2_x, sy), f"- Insufficient Evidence: {report.summary.insufficient_evidence}", fontsize=9, fontname="helv", color=(0.4, 0.4, 0.4))
-
-        # Claims & Evidence Listing
-        y += 125
-        page.insert_text(fitz.Point(margin, y), "Evaluated Scientific Claims & Evidence Audits", fontsize=12, fontname="helv", color=(0.1, 0.25, 0.5))
-        y += 15
-
-        for idx, r in enumerate(report.results, 1):
-            # Check page overflow
-            if y > 700:
-                page = doc.new_page()
-                y = 50
-
-            status_colors = {
-                "supported": ((0.1, 0.5, 0.1), (0.9, 0.98, 0.9)),
-                "partially_supported": ((0.7, 0.4, 0.0), (1.0, 0.96, 0.9)),
-                "unsupported": ((0.8, 0.1, 0.1), (1.0, 0.92, 0.92)),
-                "contradictory": ((0.6, 0.0, 0.2), (0.98, 0.9, 0.94)),
-                "possibly_outdated": ((0.5, 0.4, 0.1), (0.98, 0.96, 0.88)),
-                "insufficient_evidence": ((0.4, 0.4, 0.4), (0.95, 0.95, 0.95)),
-            }
-            border_c, fill_c = status_colors.get(r.status.value, ((0.3, 0.3, 0.3), (0.95, 0.95, 0.95)))
-
-            # Claim Card Rect
-            card_h = 100 + (len(r.evidence_items) * 45)
-            card_rect = fitz.Rect(margin, y, width - margin, y + min(card_h, 240))
-            page.draw_rect(card_rect, color=border_c, fill=fill_c, width=1.0)
-
-            # Claim Header & Status
-            page.insert_text(fitz.Point(margin + 10, y + 18), f"{idx}. Claim {r.claim_id}  [{r.status.value.upper()}]", fontsize=10, fontname="helv", color=border_c)
-            page.insert_text(fitz.Point(width - margin - 120, y + 18), f"Confidence: {r.confidence_score*100:.1f}%", fontsize=9, fontname="helv", color=(0.2, 0.2, 0.2))
-
-            # Statement
-            statement_rect = fitz.Rect(margin + 10, y + 25, width - margin - 10, y + 55)
-            page.insert_textbox(statement_rect, f"\"{r.claim_statement}\"", fontsize=8, fontname="helv", color=(0.1, 0.1, 0.1))
-
-            # Explanation
-            exp_rect = fitz.Rect(margin + 10, y + 58, width - margin - 10, y + 80)
-            page.insert_textbox(exp_rect, f"Verdict Reason: {r.explanation}", fontsize=8, fontname="helv", color=(0.3, 0.3, 0.3))
-
-            # Human review status if applicable
-            ey = y + 85
-            if r.review_status.value != "pending":
-                page.insert_text(fitz.Point(margin + 10, ey), f"Human Review: {r.review_status.value.upper()} by {r.reviewed_by or 'Reviewer'}", fontsize=8, fontname="helv", color=(0.1, 0.2, 0.6))
-                ey += 12
-
-            # Evidence passages summary
-            if r.evidence_items:
-                page.insert_text(fitz.Point(margin + 10, ey), f"Source Evidence ({len(r.evidence_items)} passages retrieved):", fontsize=8, fontname="helv", color=(0.2, 0.2, 0.2))
-                ey += 12
-                for ev in r.evidence_items[:2]:  # show up to 2 key passages
-                    ev_text = f"• [{ev.source_database.upper()}] {ev.source_work_title[:60]}...: \"{ev.passage_text[:110]}...\""
-                    ev_rect = fitz.Rect(margin + 15, ey, width - margin - 10, ey + 24)
-                    page.insert_textbox(ev_rect, ev_text, fontsize=7, fontname="helv", color=(0.25, 0.25, 0.25))
-                    ey += 26
-
-            y += min(card_h, 240) + 12
-
-        # Final Provenance Notice on last page
-        if y > 720:
+        def new_page():
             page = doc.new_page()
-            y = 50
-        footer_rect = fitz.Rect(margin, y, width - margin, y + 40)
-        page.draw_rect(footer_rect, color=(0.8, 0.8, 0.8), fill=(0.96, 0.96, 0.96), width=0.5)
-        page.insert_text(fitz.Point(margin + 10, y + 16), "Verification Provenance & Integrity Guarantee", fontsize=8, fontname="helv", color=(0.2, 0.2, 0.2))
-        page.insert_text(fitz.Point(margin + 10, y + 28), "CiteVerify strictly queries public academic repositories. All classifications require human expert validation.", fontsize=7, fontname="helv", color=(0.4, 0.4, 0.4))
+            width = page.rect.width
+            page.draw_rect(
+                fitz.Rect(margin, 28, width - margin, 74),
+                color=blue,
+                fill=(0.93, 0.96, 1.0),
+                width=1.2,
+            )
+            page.insert_text(
+                fitz.Point(margin + 14, 55),
+                "CiteVerify Scientific Audit Report",
+                fontsize=15,
+                fontname="hebo",
+                color=blue,
+            )
+            return page, 91
+
+        page, y = new_page()
+
+        def wrapped_lines(value: Any, fontsize: float, fontname: str, max_width: float):
+            font = fitz.Font(fontname=fontname)
+            output = []
+            for paragraph in safe_text(value).splitlines() or [""]:
+                words = paragraph.split()
+                if not words:
+                    output.append("")
+                    continue
+                line = ""
+                for word in words:
+                    candidate = f"{line} {word}".strip()
+                    if font.text_length(candidate, fontsize=fontsize) <= max_width:
+                        line = candidate
+                        continue
+                    if line:
+                        output.append(line)
+                        line = ""
+                    if font.text_length(word, fontsize=fontsize) <= max_width:
+                        line = word
+                        continue
+                    fragment = ""
+                    for character in word:
+                        if fragment and font.text_length(fragment + character, fontsize=fontsize) > max_width:
+                            output.append(fragment)
+                            fragment = character
+                        else:
+                            fragment += character
+                    line = fragment
+                if line:
+                    output.append(line)
+            return output
+
+        def write(value: Any, fontsize: float = 9, color=muted, bold: bool = False, indent: float = 0, gap: float = 3):
+            nonlocal page, y
+            fontname = "hebo" if bold else "helv"
+            line_height = fontsize * 1.38
+            max_width = page.rect.width - (margin * 2) - indent
+            for line in wrapped_lines(value, fontsize, fontname, max_width):
+                if y + line_height > bottom:
+                    page, y = new_page()
+                    max_width = page.rect.width - (margin * 2) - indent
+                if line:
+                    page.insert_text(
+                        fitz.Point(margin + indent, y + fontsize),
+                        line,
+                        fontsize=fontsize,
+                        fontname=fontname,
+                        color=color,
+                    )
+                y += line_height
+            y += gap
+
+        def heading(value: str):
+            nonlocal page, y
+            if y + 26 > bottom:
+                page, y = new_page()
+            y += 5
+            write(value, fontsize=12, color=blue, bold=True, gap=7)
+
+        write(report.filename, fontsize=17, color=blue, bold=True, gap=5)
+        write(f"Document ID: {report.document_id} | Pages: {report.total_pages}", fontsize=9, color=muted)
+        write(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} | Processing time: {report.summary.processing_time_seconds:.2f} seconds", fontsize=9, color=muted, gap=8)
+
+        heading("Verification summary")
+        summary_rows = [
+            f"Claims evaluated: {report.summary.total_claims}",
+            f"Supported: {report.summary.supported} | Partially supported: {report.summary.partially_supported} | Unsupported: {report.summary.unsupported}",
+            f"Contradictory: {report.summary.contradictory} | Possibly outdated: {report.summary.possibly_outdated} | Insufficient evidence: {report.summary.insufficient_evidence}",
+            f"Distinct in-text citation keys: {report.summary.total_citations_found}",
+            f"Bibliographic references parsed: {len(report.bibliography)} | References resolved: {report.summary.total_citations_resolved}",
+        ]
+        for row in summary_rows:
+            write(row, fontsize=9, color=(0.12, 0.18, 0.25), gap=2)
+
+        heading("Claim verification and evidence")
+        if not report.results:
+            write(
+                "No eligible scientific claims with citation evidence were extracted. "
+                "No claim verdicts have been inferred for this document.",
+                fontsize=10,
+                color=muted,
+                gap=8,
+            )
+
+        for index, result in enumerate(report.results, 1):
+            if y + 36 > bottom:
+                page, y = new_page()
+            page.draw_line(
+                fitz.Point(margin, y + 3),
+                fitz.Point(page.rect.width - margin, y + 3),
+                color=(0.78, 0.82, 0.88),
+                width=0.7,
+            )
+            y += 8
+            status = result.status.value.replace("_", " ").upper()
+            status_color = {
+                "SUPPORTED": (0.12, 0.48, 0.24),
+                "PARTIALLY SUPPORTED": (0.66, 0.39, 0.08),
+                "UNSUPPORTED": (0.68, 0.16, 0.16),
+                "CONTRADICTORY": (0.57, 0.10, 0.24),
+                "POSSIBLY OUTDATED": (0.50, 0.39, 0.10),
+                "INSUFFICIENT EVIDENCE": muted,
+            }.get(status, blue)
+            write(
+                f"{index}. {result.claim_id} | {status} | Confidence {result.confidence_score * 100:.1f}%",
+                fontsize=10,
+                color=status_color,
+                bold=True,
+                gap=3,
+            )
+            write("Claim statement", fontsize=8, color=blue, bold=True, gap=1)
+            write(result.claim_statement, fontsize=9, color=(0.12, 0.15, 0.19), indent=8, gap=3)
+            write("System explanation", fontsize=8, color=blue, bold=True, gap=1)
+            write(result.explanation, fontsize=9, color=muted, indent=8, gap=3)
+
+            if result.review_status.value != "pending":
+                review_text = f"Human review: {result.review_status.value.upper()} by {result.reviewed_by or 'Reviewer'}"
+                if result.human_notes:
+                    review_text += f" | Notes: {result.human_notes}"
+                write(review_text, fontsize=8, color=blue, indent=8, gap=3)
+
+            if result.matched_citations:
+                write("Matched references", fontsize=8, color=blue, bold=True, gap=1)
+                for reference in result.matched_citations:
+                    write(f"[{reference.key}] {reference.raw_text}", fontsize=8, color=muted, indent=8, gap=1)
+                    if reference.doi:
+                        write(f"DOI: https://doi.org/{reference.doi}", fontsize=8, color=muted, indent=16, gap=1)
+
+            if result.evidence_items:
+                write("Retrieved evidence", fontsize=8, color=blue, bold=True, gap=1)
+                for evidence in result.evidence_items:
+                    source_line = f"{evidence.source_work_title} | {evidence.source_database} | {evidence.evidence_type.value}"
+                    if evidence.page_number:
+                        source_line += f" | source page {evidence.page_number}"
+                    if evidence.relevance_score is not None:
+                        source_line += f" | relevance {evidence.relevance_score * 100:.1f}%"
+                    write(source_line, fontsize=8, color=(0.12, 0.18, 0.25), indent=8, gap=1)
+                    if evidence.source_doi:
+                        write(f"DOI: https://doi.org/{evidence.source_doi}", fontsize=8, color=muted, indent=16, gap=1)
+                    if evidence.source_url:
+                        write(f"Source URL: {evidence.source_url}", fontsize=8, color=muted, indent=16, gap=1)
+                    write(f"Passage: {evidence.passage_text}", fontsize=8, color=muted, indent=16, gap=3)
+            else:
+                write("No direct evidence passage was retrieved for this claim.", fontsize=8, color=muted, indent=8, gap=5)
+
+        if report.bibliography:
+            heading("Bibliography parsed from the uploaded document")
+            for reference in report.bibliography:
+                write(f"[{reference.key}] {reference.raw_text}", fontsize=8, color=(0.12, 0.15, 0.19), indent=4, gap=1)
+                if reference.doi:
+                    write(f"DOI: https://doi.org/{reference.doi}", fontsize=8, color=muted, indent=12, gap=2)
+
+        write(
+            "Automated evidence classifications require human review. The report distinguishes stored verification records from unavailable or unverified source material.",
+            fontsize=8,
+            color=muted,
+            gap=0,
+        )
+
+        page_count = len(doc)
+        for index in range(page_count):
+            current_page = doc[index]
+            current_page.insert_text(
+                fitz.Point(margin, current_page.rect.height - 24),
+                f"CiteVerify | Page {index + 1} of {page_count}",
+                fontsize=8,
+                fontname="helv",
+                color=muted,
+            )
 
         pdf_bytes = doc.write()
         doc.close()
