@@ -7,6 +7,8 @@ import pytest
 from research_engine.pipeline import VerificationPipeline
 from research_engine.claims.citation_linker import CitationLinker
 from research_engine.bibliography.parser import BibliographyParser
+from research_engine.claims.claim_miner import ClaimMiner
+from research_engine.extractor.pdf_extractor import ExtractedPage
 from research_engine.core.models import VerificationStatus
 
 
@@ -44,6 +46,28 @@ def test_citation_linker_in_text():
     assert markers[0].page_number == 1
     assert "Prior works" in markers[0].context_sentence
 
+
+def test_claim_miner_rejects_citation_instructions_and_keeps_body_before_references():
+    miner = ClaimMiner()
+    instruction = ExtractedPage(
+        page_num=1,
+        text="CITATION DETECTION & MAPPING Find citations such as [1], (Author, Year) and the reference list.",
+        blocks=[],
+    )
+    assert miner.extract_claims_from_pages([instruction]) == []
+
+    mixed_page = ExtractedPage(
+        page_num=1,
+        text=(
+            "The results demonstrate that the proposed method improves recognition accuracy by 12% [1].\\n"
+            "References\\n[1] Example, A. A relevant source. 2024."
+        ),
+        blocks=[],
+    )
+    claims = miner.extract_claims_from_pages([mixed_page], bib_start_page=1)
+    assert len(claims) == 1
+    assert "improves recognition accuracy by 12%" in claims[0].statement
+    assert claims[0].citation_keys == ["1"]
 
 def test_bibliography_parser_metadata_extraction():
     """Verify BibliographyParser extracts DOIs, arXiv IDs, titles, and publication years."""
