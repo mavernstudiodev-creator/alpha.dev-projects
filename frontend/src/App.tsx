@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ToastProvider } from './components/common/Toast';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { IntroAnimation } from './components/common/IntroAnimation';
 
 // Public Pages
 import { LandingPage } from './pages/LandingPage';
@@ -29,11 +30,16 @@ import { SettingsPage } from './pages/SettingsPage';
 import { HelpPage } from './pages/HelpPage';
 import { AssistantPage } from './pages/AssistantPage';
 
+const routerBasename = import.meta.env.BASE_URL === '/'
+  ? undefined
+  : import.meta.env.BASE_URL.replace(/\/$/, '');
+
 export const App: React.FC = () => {
   return (
     <ThemeProvider>
       <ToastProvider>
-        <BrowserRouter>
+        <IntroAnimation />
+        <BrowserRouter basename={routerBasename}>
           <Routes>
             {/* Public Website */}
             <Route path="/" element={<LandingPage />} />
@@ -76,3 +82,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
