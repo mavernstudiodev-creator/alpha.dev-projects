@@ -1,115 +1,103 @@
 """
-Unit & Integration Test for CiteVerify Research Engine
+Pytest Suite for CiteVerify Research Engine
+Tests CitationLinker, BibliographyParser, and the full VerificationPipeline.
 """
 
-import os
-import sys
-import asyncio
-import pymupdf as fitz
-
-# Ensure backend directory is in sys.path when running script directly
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import pytest
 from research_engine.pipeline import VerificationPipeline
 from research_engine.claims.citation_linker import CitationLinker
 from research_engine.bibliography.parser import BibliographyParser
+from research_engine.core.models import VerificationStatus
 
 
-def create_sample_academic_pdf(file_path: str):
-    """Generate a realistic test academic PDF with citations and bibliography."""
-    doc = fitz.open()
+def test_citation_linker_range_expansion():
+    """Verify that CitationLinker correctly expands numeric citation ranges and single keys."""
+    linker = CitationLinker()
 
-    # Page 1: Introduction and Claims
-    page1 = doc.new_page()
-    text1 = (
-        "CiteVerify Experimental Benchmark Paper\n"
-        "AlphaDev Research Group, 2026\n\n"
-        "Abstract\n"
-        "Scientific claims require empirical validation against original source evidence. This study evaluates claim verification accuracy.\n\n"
-        "1. Introduction\n"
-        "The transformer architecture was originally proposed for sequence modeling tasks [1].\n"
-        "Later studies demonstrate that deep residual learning significantly improves gradient propagation in very deep neural networks [2].\n"
-        "However, earlier classical methods [3] claimed that linear models consistently outperform deep architectures on structured tabular datasets.\n\n"
-        "2. Methodology & Findings\n"
-        "Recent experiments confirm that self-attention mechanisms achieve superior parallelization compared to recurrent models [1].\n"
-        "Furthermore, our benchmarks indicate that residual connections reduce optimization error by 42% on image recognition tasks [2].\n"
-    )
-    page1.insert_textbox(fitz.Rect(50, 50, 540, 750), text1, fontsize=10)
+    # Test complex mixed range
+    expanded = linker.expand_citation_range("1, 2, 4-6")
+    assert expanded == ["1", "2", "4", "5", "6"], f"Failed expanding '1, 2, 4-6', got: {expanded}"
 
-    # Page 2: References section
-    page2 = doc.new_page()
-    text2 = (
-        "References\n"
-        "[1] Vaswani, A., Shazeer, N., Parmar, N., et al. Attention Is All You Need. Advances in Neural Information Processing Systems, 2017. arXiv:1706.03762.\n"
+    # Test single key
+    single = linker.expand_citation_range("3")
+    assert single == ["3"], f"Failed expanding '3', got: {single}"
+
+    # Test unicode en-dash
+    en_dash = linker.expand_citation_range("1–3")
+    assert en_dash == ["1", "2", "3"], f"Failed expanding '1–3', got: {en_dash}"
+
+    # Test empty or non-numeric
+    empty = linker.expand_citation_range("")
+    assert empty == [], f"Expected empty list for empty string, got: {empty}"
+
+
+def test_citation_linker_in_text():
+    """Verify CitationLinker detects bracketed citations in text with context."""
+    linker = CitationLinker()
+    sample_text = "Prior works [1] demonstrated strong gains, while newer approaches [2, 4-5] confirmed scalability."
+    
+    markers = linker.find_citations_in_text(sample_text, page_number=1)
+    assert len(markers) == 2, f"Expected 2 citation markers, found {len(markers)}"
+
+    assert markers[0].keys == ["1"], f"Expected ['1'], got {markers[0].keys}"
+    assert markers[1].keys == ["2", "4", "5"], f"Expected ['2', '4', '5'], got {markers[1].keys}"
+    assert markers[0].page_number == 1
+    assert "Prior works" in markers[0].context_sentence
+
+
+def test_bibliography_parser_metadata_extraction():
+    """Verify BibliographyParser extracts DOIs, arXiv IDs, titles, and publication years."""
+    parser = BibliographyParser()
+    raw_bib = (
+        "[1] Vaswani, A., Shazeer, N., Parmar, N., et al. Attention Is All You Need. Advances in NIPS, 2017. arXiv:1706.03762.\n"
         "[2] He, K., Zhang, X., Ren, S., Sun, J. Deep Residual Learning for Image Recognition. IEEE CVPR, 2016. 10.1109/CVPR.2016.90.\n"
-        "[3] Oldtimer, J. Linear models for tabular prediction. Journal of Archaic Computing, 1998.\n"
+        "[3] Simple, A. Baseline study for regression. Journal of Basic Stats, 2005."
     )
-    page2.insert_textbox(fitz.Rect(50, 50, 540, 750), text2, fontsize=10)
 
-    doc.save(file_path)
-    doc.close()
+    entries = parser.parse_bibliography(raw_bib)
+    assert len(entries) == 3, f"Expected 3 entries, parsed {len(entries)}"
 
+    # Entry 1: arXiv ID
+    assert entries[0].key == "1"
+    assert entries[0].arxiv_id == "1706.03762", f"Expected arXiv ID '1706.03762', got {entries[0].arxiv_id}"
+    assert entries[0].year == 2017, f"Expected year 2017, got {entries[0].year}"
+    assert entries[0].resolved is True
 
-async def run_pipeline_test():
-    test_pdf = os.path.abspath("test_academic_sample.pdf")
-    try:
-        print("[1] Generating sample PDF...")
-        create_sample_academic_pdf(test_pdf)
-        print(f"Sample PDF created at {test_pdf}")
+    # Entry 2: DOI
+    assert entries[1].key == "2"
+    assert entries[1].doi == "10.1109/CVPR.2016.90", f"Expected DOI '10.1109/CVPR.2016.90', got {entries[1].doi}"
+    assert entries[1].year == 2016, f"Expected year 2016, got {entries[1].year}"
+    assert entries[1].resolved is True
 
-        print("[2] Running CitationLinker tests...")
-        linker = CitationLinker()
-        expanded = linker.expand_citation_range("1, 2, 4-6")
-        assert expanded == ["1", "2", "4", "5", "6"], f"Unexpected expansion: {expanded}"
-        print("CitationLinker test passed!")
-
-        print("[3] Running BibliographyParser tests...")
-        parser = BibliographyParser()
-        raw_bib = "[1] Vaswani et al. Attention Is All You Need. 2017. arXiv:1706.03762.\n[2] He et al. 2016. 10.1109/CVPR.2016.90"
-        entries = parser.parse_bibliography(raw_bib)
-        assert len(entries) == 2
-        assert entries[0].arxiv_id == "1706.03762"
-        assert entries[1].doi == "10.1109/CVPR.2016.90"
-        print("BibliographyParser test passed!")
-
-        print("[4] Initializing VerificationPipeline...")
-        pipeline = VerificationPipeline()
-
-        print("[5] Executing full pipeline on sample PDF...")
-        report = await pipeline.process_pdf(test_pdf)
-
-        print("\n=== VERIFICATION REPORT SUMMARY ===")
-        print(f"Document: {report.filename} (Pages: {report.total_pages})")
-        print(f"Total Claims Mined: {report.summary.total_claims}")
-        print(f"Total Citations Found: {report.summary.total_citations_found}")
-        print(f"Total Citations Resolved: {report.summary.total_citations_resolved}")
-        print(f"Classification Breakdown:")
-        print(f" - Supported: {report.summary.supported}")
-        print(f" - Partially Supported: {report.summary.partially_supported}")
-        print(f" - Unsupported: {report.summary.unsupported}")
-        print(f" - Contradictory: {report.summary.contradictory}")
-        print(f" - Possibly Outdated: {report.summary.possibly_outdated}")
-        print(f" - Insufficient Evidence: {report.summary.insufficient_evidence}")
-        print(f"Processing time: {report.summary.processing_time_seconds}s")
-
-        for idx, res in enumerate(report.results, 1):
-            print(f"\nClaim #{idx} [{res.claim_id}]: {res.claim_statement[:80]}...")
-            print(f"Status: {res.status.value.upper()} (Confidence: {res.confidence_score:.2f})")
-            print(f"Explanation: {res.explanation}")
-            print(f"Evidence items count: {len(res.evidence_items)}")
-            for ev in res.evidence_items:
-                print(f"  * [{ev.evidence_type.value}] {ev.source_work_title} | Relevance: {ev.relevance_score:.2f}")
-                print(f"    Excerpt: {ev.passage_text[:120]}...")
-
-        print("\nFull pipeline verification test successfully completed!")
-
-    finally:
-        if os.path.exists(test_pdf):
-            try:
-                os.remove(test_pdf)
-            except Exception:
-                pass
+    # Entry 3: Classical non-indexed entry
+    assert entries[2].key == "3"
+    assert entries[2].year == 2005
 
 
-if __name__ == "__main__":
-    asyncio.run(run_pipeline_test())
+@pytest.mark.asyncio
+async def test_verification_pipeline_process_pdf(sample_pdf_path):
+    """Verify that the master VerificationPipeline extracts claims, citations, and evaluates evidence."""
+    pipeline = VerificationPipeline()
+    report = await pipeline.process_pdf(sample_pdf_path)
+
+    # Document-level checks
+    assert report.total_pages == 2, f"Expected 2 pages, got {report.total_pages}"
+    assert report.summary.total_claims > 0, "No scientific claims were mined"
+    assert report.summary.total_citations_found > 0, "No bibliography citations found"
+    assert len(report.results) == report.summary.total_claims, "Mismatch between results and total claims"
+
+    # Claim evaluation checks
+    valid_statuses = set(VerificationStatus)
+    for res in report.results:
+        assert res.claim_id.startswith("CLM-"), f"Invalid claim ID format: {res.claim_id}"
+        assert len(res.claim_statement) > 10, f"Claim statement too short: {res.claim_statement}"
+        assert res.status in valid_statuses, f"Unknown status: {res.status}"
+        assert 0.0 <= res.confidence_score <= 1.0, f"Confidence out of range: {res.confidence_score}"
+        assert len(res.explanation) > 0, "Explanation must not be empty"
+
+        # Provenance integrity checks
+        for ev in res.evidence_items:
+            assert ev.source_work_title, "Evidence passage missing source title"
+            assert ev.source_database, "Evidence passage missing source database"
+            assert ev.passage_text, "Evidence passage text is empty"
+            assert ev.evidence_type in ["full_text", "abstract_only", "metadata_only"]
