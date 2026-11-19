@@ -30,6 +30,6 @@ Vite proxies `/api` to `http://127.0.0.1:8000` by default. Set `VITE_API_URL` to
 
 ## Backend configuration
 
-The API reads `DATABASE_URL`, `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`, and `NVIDIA_MODEL` from the environment. NVIDIA access is optional; the assistant uses the backend's grounded local response mode when no key is configured. Keep these values server-side and out of `frontend/.env*` files.
+The API reads `DATABASE_URL`, `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`, and `NVIDIA_MODEL` from the environment and the repository-root `.env` file. Copy `.env.example` to `.env` and set `NVIDIA_API_KEY` there for local NVIDIA NIM access. NVIDIA access is optional; the assistant uses the backend's grounded local response mode when no key is configured. Keep `.env` server-side and out of `frontend/.env*` files.
 
 The interactive API documentation is available at `/docs`, and health is reported at `/api/health`.
