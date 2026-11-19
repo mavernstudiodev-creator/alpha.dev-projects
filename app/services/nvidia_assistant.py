@@ -582,49 +582,40 @@ class NvidiaAssistantService:
 
     def _synthesize_grounded_fallback(self, grounded_context: str, user_query: str) -> str:
         """
-        Deterministic, local grounded synthesis based on verified PDF evidence.
-        Guarantees zero crashes and complete testability when NVIDIA API key is offline.
+        Provide a truthful, extractive response when NVIDIA NIM is unavailable.
+        This fallback never claims that citations or evidence were checked unless
+        those facts are present in the stored verification report.
         """
+        query = user_query.strip()
+        if re.fullmatch(r"(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|how\s+are\s+you)[!?.\s]*", query, re.IGNORECASE):
+            return (
+                "Hi! I’m CiteVerify’s research assistant. Ask me about a claim, its evidence or citations, "
+                "or the selected research document. Select a processed document for file-specific answers."
+            )
+
         if not grounded_context or "<document_context" not in grounded_context:
             return (
-                "No verified document context was provided. As the CiteVerify AI Assistant, "
-                "I require an uploaded academic paper to verify claims against empirical source evidence. "
-                "Please upload a research PDF to begin."
+                "I don’t have a selected, processed document to ground this answer in. "
+                "Select a processed PDF and ask a specific question about its claims or evidence."
             )
 
-        q_lower = user_query.lower()
+        filename_match = re.search(r'<document_context[^>]*\bfilename="([^"]*)"[^>]*\btotal_pages="(\d+)"', grounded_context)
+        summary_match = re.search(r"^DOCUMENT SUMMARY:\s*(.+)$", grounded_context, re.MULTILINE)
+        document_name = filename_match.group(1) if filename_match else "the selected document"
+        page_count = filename_match.group(2) if filename_match else None
+
         lines = [
-            "### CiteVerify Research Analysis (Grounded Synthesis)",
-            "Based on the verified document context and retrieved academic evidence:\n",
+            "### Assistant response is limited",
+            "I couldn’t generate a tailored answer because NVIDIA NIM is not configured or did not respond.",
+            "",
+            f"**Selected document:** {document_name}" + (f" ({page_count} pages)" if page_count else ""),
         ]
-
-        if "explain" in q_lower or "why" in q_lower or "verdict" in q_lower:
-            lines.append(
-                "- **Verification Reasoning:** The claims were extracted directly from the paper and cross-referenced "
-                "with live metadata and open-access passages from Crossref, OpenAlex, Semantic Scholar, Europe PMC, and arXiv.\n"
-                "- **Evidence Alignment:** Verified passages are evaluated based on lexical and semantic overlap with original source publications."
-            )
-        elif "methodology" in q_lower or "method" in q_lower:
-            lines.append(
-                "- **Methodology Audit:** The document outlines experimental validation procedures. "
-                "Original findings were compared against referenced literature to check for consistency and reproducible benchmarks."
-            )
-        elif "gap" in q_lower or "missing" in q_lower:
-            lines.append(
-                "- **Evidence Gaps:** When full-text open-access PDFs are unavailable or restricted behind paywalls, "
-                "CiteVerify defaults to 'insufficient_evidence' to prevent unsubstantiated conclusions. Human expert review is recommended."
-            )
-        else:
-            lines.append(
-                "- **Document Insights:** The analyzed research paper presents empirical claims linked to cited references. "
-                "All citations have been checked against public scholarly repositories to preserve evidence provenance."
-            )
-
+        if summary_match:
+            lines.append(f"**Verification record:** {summary_match.group(1).strip()}")
         lines.extend([
-            "\n*Note: NVIDIA NIM API key is not currently configured or was unreachable; "
-            "this response was synthesized directly from the document's verified evidence records.*"
+            "",
+            "This fallback reports only document metadata and stored verification counts; it does not infer claim meaning or claim that citations were checked. Open the verification report for claim-level evidence, or try again when the AI service is available.",
         ])
-
         return "\n".join(lines)
 
 
