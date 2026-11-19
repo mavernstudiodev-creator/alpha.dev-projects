@@ -4,6 +4,7 @@ Tests CitationLinker, BibliographyParser, and the full VerificationPipeline.
 """
 
 import pytest
+import pymupdf as fitz
 from research_engine.pipeline import VerificationPipeline, DocumentVerificationReport, VerificationSummary
 from app.services.report_generator import ReportGenerator
 from research_engine.core.models import EvidencePassage, EvidenceType, VerificationResult
