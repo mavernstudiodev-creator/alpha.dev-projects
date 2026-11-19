@@ -8,9 +8,11 @@ import os
 import json
 import uuid
 import logging
+import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import httpx
+import pymupdf
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -36,6 +38,9 @@ CRITICAL INSTRUCTIONS & ACCURACY RULES:
 5. If the provided document context or evidence is insufficient to answer the question with scientific confidence, explicitly state: "Insufficient evidence is available in the verified document records to confirm this with certainty."
 6. NEVER alter or override official system verification verdicts (Supported, Partially Supported, Unsupported, Contradictory, Possibly Outdated, Insufficient Evidence).
 7. Maintain a rigorous, objective, and analytical scientific tone at all times.
+8. When a selected document is provided, answer only about the filename and document_id in that context. Do not use details from other files or older conversation turns as facts. If the user asks about a different file, ask them to select it in a new conversation.
+9. For document summaries, return readable Markdown with a short overview, key topics, the exact verification statistics from the context, and evidence limitations. Do not repeat raw JSON or escape Markdown punctuation.
+10. Separate statements found in the PDF from conclusions supported by retrieved evidence. Never describe extracted claims as verified facts unless the verdict and evidence support them.
 """
 
 
@@ -123,14 +128,15 @@ class NvidiaAssistantService:
 
     @staticmethod
     def get_conversation_history(db: Session, conversation_id: str, limit: int = 50) -> List[AIMessageDB]:
-        """Fetch chronologically ordered message history."""
-        return (
+        """Fetch the latest messages, returned in chronological order."""
+        newest_first = (
             db.query(AIMessageDB)
             .filter(AIMessageDB.conversation_id == conversation_id)
-            .order_by(AIMessageDB.created_at.asc())
+            .order_by(AIMessageDB.created_at.desc())
             .limit(limit)
             .all()
         )
+        return list(reversed(newest_first))
 
     # -------------------------------------------------------------
     # Grounded Context Synthesis (RAG)
@@ -160,6 +166,30 @@ class NvidiaAssistantService:
         except Exception:
             return TupleContext(context_str="", sources=[])
 
+        # The report stores claims and verdicts, but not the complete manuscript
+        # text. Read only the PDF referenced by this selected document record so
+        # summary questions are grounded in the correct file.
+        document_text = ""
+        if doc.file_path and os.path.isfile(doc.file_path):
+            try:
+                with pymupdf.open(doc.file_path) as pdf:
+                    text_parts = []
+                    remaining = 28000
+                    for page_number, page in enumerate(pdf, start=1):
+                        if remaining <= 0:
+                            break
+                        page_text = (page.get_text("text") or "").strip()
+                        if not page_text:
+                            continue
+                        excerpt = page_text[:remaining]
+                        text_parts.append(f"[PDF page {page_number}]\n{excerpt}")
+                        remaining -= len(excerpt)
+                    document_text = "\n\n".join(text_parts)
+                    if remaining <= 0:
+                        document_text += "\n[Document text excerpt truncated at the assistant context limit.]"
+            except Exception as exc:
+                logger.warning("Could not extract selected PDF text for assistant context (%s)", type(exc).__name__)
+
         context_parts = [
             f"<document_context document_id=\"{doc.id}\" filename=\"{doc.filename}\" total_pages=\"{doc.total_pages}\">",
             f"DOCUMENT SUMMARY: Claims: {report_data.get('summary', {}).get('total_claims', 0)} | "
@@ -169,14 +199,30 @@ class NvidiaAssistantService:
             f"Contradictory: {report_data.get('summary', {}).get('contradictory', 0)} | "
             f"Insufficient Evidence: {report_data.get('summary', {}).get('insufficient_evidence', 0)}",
             "",
+            "SELECTED SOURCE DOCUMENT TEXT (verbatim text extracted from this PDF):",
+            document_text or "No selectable text could be read from the stored PDF; use only the verified report records below and say when they are insufficient.",
+            "",
             "VERIFIED CLAIMS AND EVIDENCE PASSAGES:",
         ]
 
         sources = []
         results = report_data.get("results", [])
-        query_words = set(query.lower().split())
+        query_words = set(re.findall(r"[a-z0-9]{3,}", query.lower())) - {
+            "the", "and", "for", "with", "from", "that", "this", "what", "about",
+            "document", "paper", "file", "summary", "summarize", "please", "into",
+        }
 
+        scored_results = []
         for r in results:
+            claim_words = set(re.findall(r"[a-z0-9]{3,}", r.get("claim_statement", "").lower()))
+            score = len(query_words.intersection(claim_words))
+            if target_claim_id and r.get("claim_id") == target_claim_id:
+                score += 1000
+            scored_results.append((score, r))
+        if len(scored_results) > 25:
+            scored_results = sorted(scored_results, key=lambda item: item[0], reverse=True)[:15]
+
+        for _, r in scored_results:
             c_id = r.get("claim_id")
             statement = r.get("claim_statement", "")
             status = r.get("status", "")
@@ -184,12 +230,7 @@ class NvidiaAssistantService:
             explanation = r.get("explanation", "")
             evidence_items = r.get("evidence_items", [])
 
-            # Relevance heuristic: match target_claim_id, or word intersection with query
-            is_relevant = (
-                (target_claim_id and c_id == target_claim_id)
-                or bool(query_words.intersection(statement.lower().split()))
-                or len(results) <= 5  # include all if concise document
-            )
+            is_relevant = True
 
             if is_relevant:
                 claim_entry = [
@@ -374,8 +415,8 @@ class NvidiaAssistantService:
                 "model": settings.NVIDIA_MODEL,
                 "messages": messages,
                 "temperature": 0.2,
-                "top_p": 0.7,
-                "max_tokens": 1500,
+                "max_tokens": 2500,
+                "chat_template_kwargs": {"enable_thinking": False},
                 "stream": True,
             }
 
@@ -383,21 +424,27 @@ class NvidiaAssistantService:
             try:
                 client = http_client or httpx.AsyncClient(timeout=settings.NVIDIA_TIMEOUT)
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            token_data = line[6:].strip()
-                            if token_data == "[DONE]":
-                                break
-                            try:
-                                parsed = json.loads(token_data)
-                                delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if delta:
-                                    accumulated.append(delta)
-                                    yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
-                            except Exception:
-                                pass
+                    if not response.is_success:
+                        logger.warning("NVIDIA NIM streaming request failed with HTTP %d", response.status_code)
+                    else:
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                token_data = line[6:].strip()
+                                if token_data == "[DONE]":
+                                    break
+                                try:
+                                    parsed = json.loads(token_data)
+                                    delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if delta:
+                                        accumulated.append(delta)
+                                        yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+                                except Exception:
+                                    pass
 
                 full_text = "".join(accumulated)
+                if not full_text:
+                    logger.warning("NVIDIA NIM returned no user-visible content for the streaming request")
+                    raise ValueError("NVIDIA NIM returned an empty response")
                 asst_msg = AIMessageDB(
                     id=f"MSG-{uuid.uuid4().hex[:8].upper()}",
                     conversation_id=conversation_id,
@@ -413,7 +460,7 @@ class NvidiaAssistantService:
                 return
 
             except Exception as e:
-                logger.warning("Streaming from NVIDIA failed: %s. Using local grounded fallback.", e)
+                logger.warning("Streaming from NVIDIA failed (%s). Using local grounded fallback.", type(e).__name__)
 
         # Local grounded fallback stream
         fallback_text = self._synthesize_grounded_fallback(tuple_ctx.context_str, user_query)
@@ -504,8 +551,8 @@ class NvidiaAssistantService:
                 "model": settings.NVIDIA_MODEL,
                 "messages": messages,
                 "temperature": 0.2,
-                "top_p": 0.7,
-                "max_tokens": 1500,
+                "max_tokens": 2500,
+                "chat_template_kwargs": {"enable_thinking": False},
                 "stream": False,
             }
 
@@ -521,9 +568,12 @@ class NvidiaAssistantService:
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if content:
                         return content
-                logger.warning("NVIDIA NIM API responded with status %d: %s", resp.status_code, resp.text)
+                    finish_reason = data.get("choices", [{}])[0].get("finish_reason")
+                    logger.warning("NVIDIA NIM returned no user-visible content (finish_reason=%s)", finish_reason)
+                else:
+                    logger.warning("NVIDIA NIM request failed with HTTP %d", resp.status_code)
             except Exception as e:
-                logger.warning("Failed communicating with NVIDIA NIM API (%s). Falling back to grounded synthesis.", e)
+                logger.warning("Failed communicating with NVIDIA NIM (%s). Falling back to grounded synthesis.", type(e).__name__)
 
         # Fallback to local grounded answer synthesizer
         return self._synthesize_grounded_fallback(grounded_context, user_query)
