@@ -149,6 +149,32 @@ async def test_document_status_endpoint(async_client, verified_document):
     assert data["total_pages"] == 2
 
 
+def test_document_pdf_is_served_inline_for_embedded_viewer(tmp_path):
+    """The PDF viewer must render the file inline, not trigger an attachment download."""
+    from types import SimpleNamespace
+    from app.api.v1.documents import get_document_pdf
+
+    pdf_path = tmp_path / "viewer-sample.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    record = SimpleNamespace(file_path=str(pdf_path), filename="viewer-sample.pdf")
+
+    class Query:
+        def filter(self, *_):
+            return self
+
+        def first(self):
+            return record
+
+    class Session:
+        def query(self, *_):
+            return Query()
+
+    response = get_document_pdf("DOC-TEST", Session())
+    assert response.status_code == 200
+    assert response.media_type == "application/pdf"
+    assert response.headers.get("content-disposition", "").startswith("inline")
+
+
 @pytest.mark.asyncio
 async def test_document_claims_endpoint(async_client, verified_document):
     """Verify detailed claims endpoint."""

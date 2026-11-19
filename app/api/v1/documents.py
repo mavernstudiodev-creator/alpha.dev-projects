@@ -368,7 +368,15 @@ def get_document_pdf(doc_id: str, db: Session = Depends(get_db)):
     if not doc or not os.path.exists(doc.file_path):
         raise HTTPException(status_code=404, detail="PDF file not found.")
 
-    return FileResponse(doc.file_path, media_type="application/pdf", filename=doc.filename)
+    # This endpoint is embedded by PdfViewer's <object>. Keep it inline so the
+    # browser renders the manuscript instead of treating every view request as
+    # a fresh download. The explicit UI download link still downloads on click.
+    return FileResponse(
+        doc.file_path,
+        media_type="application/pdf",
+        filename=doc.filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.get("/{doc_id}/export")
