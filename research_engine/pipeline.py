@@ -8,14 +8,16 @@ Optimized with:
 - Connection-pooled reusable HTTP client across all academic APIs and evidence harvesting.
 - Per-verification job research PDF caching for deduplicated downloads.
 - Bounded concurrency for parallel reference resolution.
+- Multi-key bibliography lookup for both numeric ([1]) and author-year ((Conneau et al., 2020)) citations.
 - Asynchronous offload for blocking PDF extraction.
 - Optional progress callback hook for background job tracking.
 """
 
 import time
+import re
 import asyncio
 import logging
-from typing import List, Dict, Optional, Callable, Any
+from typing import List, Dict, Optional, Callable, Any, Set
 import httpx
 from pydantic import BaseModel, Field
 
@@ -80,6 +82,7 @@ class VerificationPipeline:
         self,
         file_path: str,
         document_id: Optional[str] = None,
+        original_filename: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
         progress_callback: Optional[Callable[[str, int, str], Any]] = None,
     ) -> DocumentVerificationReport:
@@ -114,8 +117,6 @@ class VerificationPipeline:
         t_bib_parse = time.perf_counter() - t0
         logger.info("[%s] Parsed %d bibliography entries in %.2f ms", doc_id, len(bib_entries), t_bib_parse * 1000)
 
-        bib_map: Dict[str, BibEntry] = {b.key: b for b in bib_entries}
-
         # Stage 3: Mine scientific claims
         await _notify("claim_mining", 45, "Mining scientific propositions and citation callouts")
         t0 = time.perf_counter()
@@ -129,8 +130,8 @@ class VerificationPipeline:
             return await self._execute_verification_workflow(
                 doc_id=doc_id,
                 doc_struct=doc_struct,
+                original_filename=original_filename,
                 bib_entries=bib_entries,
-                bib_map=bib_map,
                 claims=claims,
                 http_client=http_client,
                 pipeline_start=pipeline_start,
@@ -149,8 +150,8 @@ class VerificationPipeline:
                 return await self._execute_verification_workflow(
                     doc_id=doc_id,
                     doc_struct=doc_struct,
+                    original_filename=original_filename,
                     bib_entries=bib_entries,
-                    bib_map=bib_map,
                     claims=claims,
                     http_client=session_client,
                     pipeline_start=pipeline_start,
@@ -164,8 +165,8 @@ class VerificationPipeline:
         self,
         doc_id: str,
         doc_struct: PDFDocumentStructure,
+        original_filename: Optional[str],
         bib_entries: List[BibEntry],
-        bib_map: Dict[str, BibEntry],
         claims: List[Claim],
         http_client: httpx.AsyncClient,
         pipeline_start: float,
@@ -179,29 +180,59 @@ class VerificationPipeline:
             if progress_notify:
                 await progress_notify(stage, percent, msg)
 
+        # Build multi-key flexible index for bibliography entries
+        bib_lookup: Dict[str, BibEntry] = {}
+        for b in bib_entries:
+            bib_lookup[b.key] = b
+            bib_lookup[b.key.lower()] = b
+            norm = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", b.key.lower()).split())
+            if norm:
+                bib_lookup[norm] = b
+            for a in getattr(b, "aliases", []):
+                bib_lookup[a] = b
+                bib_lookup[a.lower()] = b
+                norm_a = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", a.lower()).split())
+                if norm_a:
+                    bib_lookup[norm_a] = b
+
+        def _find_bib(k: str) -> Optional[BibEntry]:
+            if k in bib_lookup:
+                return bib_lookup[k]
+            k_low = k.lower()
+            if k_low in bib_lookup:
+                return bib_lookup[k_low]
+            norm = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", k_low).split())
+            if norm in bib_lookup:
+                return bib_lookup[norm]
+            return None
+
         # Stage 4: Resolve cited references against Academic APIs with bounded concurrency
         await _notify("citation_resolution", 65, "Resolving cited papers across Crossref, OpenAlex, Semantic Scholar, Europe PMC, and arXiv")
         t0 = time.perf_counter()
-        referenced_keys = set()
+        referenced_keys: Set[str] = set()
         for c in claims:
             referenced_keys.update(c.citation_keys)
+
+        # Map each referenced key to distinct BibEntry records
+        distinct_entries_to_resolve: Dict[str, BibEntry] = {}
+        for k in referenced_keys:
+            entry = _find_bib(k)
+            if entry and entry.key not in distinct_entries_to_resolve:
+                distinct_entries_to_resolve[entry.key] = entry
 
         resolved_works_map: Dict[str, AcademicWork] = {}
         sem = asyncio.Semaphore(5)
 
-        async def _resolve_one(k: str):
-            if k in bib_map:
-                entry = bib_map[k]
-                async with sem:
-                    try:
-                        resolved = await self.resolver.resolve_bib_entry(entry, client=http_client)
-                        return k, resolved
-                    except Exception as e:
-                        logger.warning("[%s] Failed resolving citation [%s]: %s", doc_id, k, e)
-                        return k, None
-            return k, None
+        async def _resolve_one(entry: BibEntry):
+            async with sem:
+                try:
+                    resolved = await self.resolver.resolve_bib_entry(entry, client=http_client)
+                    return entry.key, resolved
+                except Exception as e:
+                    logger.warning("[%s] Failed resolving citation [%s]: %s", doc_id, entry.key, e)
+                    return entry.key, None
 
-        tasks = [_resolve_one(k) for k in referenced_keys if k in bib_map]
+        tasks = [_resolve_one(e) for e in distinct_entries_to_resolve.values()]
         if tasks:
             results_pairs = await asyncio.gather(*tasks, return_exceptions=True)
             for pair in results_pairs:
@@ -213,7 +244,7 @@ class VerificationPipeline:
             "[%s] Resolved %d / %d cited references in %.2f ms",
             doc_id,
             len(resolved_works_map),
-            len(referenced_keys),
+            len(distinct_entries_to_resolve),
             t_citation_resolve * 1000,
         )
 
@@ -233,8 +264,16 @@ class VerificationPipeline:
 
         for claim in claims:
             # Find matching citations for this claim
-            matched_bibs = [bib_map[k] for k in claim.citation_keys if k in bib_map]
-            matched_works = [resolved_works_map[k] for k in claim.citation_keys if k in resolved_works_map]
+            matched_bibs: List[BibEntry] = []
+            matched_works: List[AcademicWork] = []
+
+            for k in claim.citation_keys:
+                entry = _find_bib(k)
+                if entry:
+                    if entry not in matched_bibs:
+                        matched_bibs.append(entry)
+                    if entry.key in resolved_works_map and resolved_works_map[entry.key] not in matched_works:
+                        matched_works.append(resolved_works_map[entry.key])
 
             # Harvest evidence
             evidence_items = []
@@ -300,7 +339,7 @@ class VerificationPipeline:
 
         return DocumentVerificationReport(
             document_id=doc_id,
-            filename=doc_struct.filename,
+            filename=original_filename or doc_struct.filename,
             total_pages=doc_struct.total_pages,
             summary=summary,
             bibliography=bib_entries,

@@ -1,6 +1,7 @@
 """
 Claim Miner
 Extracts scientific claims from academic text and correlates them with citation markers.
+Supports both numeric bracket citations ([1]) and author-year citations ((Conneau et al., 2020)).
 """
 
 import re
@@ -30,6 +31,9 @@ CLAIM_SIGNAL_KEYWORDS = [
     r"\bsuggest(?:s|ed)?\b",
     r"\bregulat(?:es?|ed|ion)\b",
     r"\bidentif(?:y|ies|ied)\b",
+    r"\bconduct(?:ed)?\b",
+    r"\btrain(?:ed)?\b",
+    r"\bdevelop(?:ed)?\b",
     r"\b%|\bpercent\b|\bp\s*<\s*0\.\d+",
 ]
 
@@ -95,11 +99,22 @@ class ClaimMiner:
         return claims
 
     def _split_into_sentences(self, text: str) -> List[str]:
-        """Split text into sentences while respecting abbreviations and citation brackets."""
-        cleaned = re.sub(r"\n(?=[a-z])", " ", text)
+        """Split text into sentences while respecting abbreviations, initials, and citation brackets."""
+        # 1. Join hyphenated words split across line breaks (e.g. "semi-\ncharacter" -> "semicharacter")
+        cleaned = re.sub(r"(\b\w+)-\n\s*(\w+\b)", r"\1\2", text)
+
+        # 2. Protect author abbreviations like "et al." and initials like "J." or "A."
+        cleaned = re.sub(r"\bet\s+al\.", "et al<DOT>", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b([A-Z])\.", r"\1<DOT>", cleaned)
+        cleaned = re.sub(r"\b(?:e\.g\.|i\.e\.|cf\.|vs\.)", lambda m: m.group(0).replace(".", "<DOT>"), cleaned, flags=re.IGNORECASE)
+
+        # 3. Clean linebreaks inside paragraphs
+        cleaned = re.sub(r"\n(?=[a-z])", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned)
-        raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z\[])", cleaned)
-        return [s.strip() for s in raw_sentences if s.strip()]
+
+        # 4. Split sentences at punctuation boundaries
+        raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z\[\"])", cleaned)
+        return [s.replace("<DOT>", ".").strip() for s in raw_sentences if s.strip()]
 
     def _clean_statement(self, sentence: str) -> str:
         """Standardize the proposition statement and strip leading section prefixes."""

@@ -116,6 +116,7 @@ class JobService:
             report: DocumentVerificationReport = await pipeline.process_pdf(
                 file_path=file_path,
                 document_id=document_id,
+                original_filename=doc.filename,
                 http_client=http_client,
                 progress_callback=_on_progress,
             )

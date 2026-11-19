@@ -99,6 +99,48 @@ async def upload_document(
 
     file_hash = hasher.hexdigest()
 
+    # Check for existing completed document with identical SHA-256 hash
+    existing_doc = (
+        db.query(DocumentDB)
+        .filter(DocumentDB.file_hash == file_hash, DocumentDB.status == "completed")
+        .order_by(DocumentDB.uploaded_at.desc())
+        .first()
+    )
+    if existing_doc and existing_doc.report_json:
+        logger.info("Deduplication: Reusing completed verification for %s (hash: %s)", existing_doc.id, file_hash)
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
+
+        audit_dedup = AuditEventDB(
+            id=f"AUD-{uuid.uuid4().hex[:8].upper()}",
+            entity_type="document",
+            entity_id=existing_doc.id,
+            action="upload_deduplicated",
+            actor="system",
+            details_json=json.dumps({"reused_document_id": existing_doc.id, "filename": filename, "file_hash": file_hash}),
+        )
+        db.add(audit_dedup)
+        db.commit()
+
+        if background:
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "job_id": f"DEDUP-{existing_doc.id}",
+                    "document_id": existing_doc.id,
+                    "filename": existing_doc.filename,
+                    "status": "completed",
+                    "message": "Document already processed and verified.",
+                },
+            )
+        else:
+            report_dict = json.loads(existing_doc.report_json)
+            report_dict["filename"] = filename or existing_doc.filename
+            return DocumentVerificationReport(**report_dict)
+
     # 3. Create initial Document record
     doc_record = DocumentDB(
         id=doc_id,
@@ -151,7 +193,12 @@ async def upload_document(
 
     # 5. Synchronous Execution Branch (Backwards Compatible with existing test suite)
     try:
-        report = await pipeline.process_pdf(dest_path, document_id=doc_id, http_client=shared_client)
+        report = await pipeline.process_pdf(
+            dest_path,
+            document_id=doc_id,
+            original_filename=filename,
+            http_client=shared_client,
+        )
 
         doc_record.total_pages = report.total_pages
         doc_record.status = "completed"

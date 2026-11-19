@@ -42,6 +42,7 @@ class BibEntry(BaseModel):
     arxiv_id: Optional[str] = None
     resolved: bool = False
     source_url: Optional[str] = None
+    aliases: List[str] = Field(default_factory=list, description="Alternative keys for author-year matching")
 
 
 class AcademicWork(BaseModel):
