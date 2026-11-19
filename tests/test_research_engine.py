@@ -59,8 +59,8 @@ def test_claim_miner_rejects_citation_instructions_and_keeps_body_before_referen
     mixed_page = ExtractedPage(
         page_num=1,
         text=(
-            "The results demonstrate that the proposed method improves recognition accuracy by 12% [1].\\n"
-            "References\\n[1] Example, A. A relevant source. 2024."
+            "The results demonstrate that the proposed method improves recognition accuracy by 12% [1].\n"
+            "References\n[1] Example, A. A relevant source. 2024."
         ),
         blocks=[],
     )
@@ -68,6 +68,7 @@ def test_claim_miner_rejects_citation_instructions_and_keeps_body_before_referen
     assert len(claims) == 1
     assert "improves recognition accuracy by 12%" in claims[0].statement
     assert claims[0].citation_keys == ["1"]
+
 
 def test_bibliography_parser_metadata_extraction():
     """Verify BibliographyParser extracts DOIs, arXiv IDs, titles, and publication years."""
