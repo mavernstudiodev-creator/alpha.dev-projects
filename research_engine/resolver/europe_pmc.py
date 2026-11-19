@@ -1,6 +1,7 @@
 """
 Europe PMC REST API Integration Client
 Retrieves biomedical research articles, open-access full text links, and abstracts.
+Supports connection-pooled reusable HTTP clients.
 """
 
 import logging
@@ -24,7 +25,7 @@ class EuropePMCClient:
             "Accept": "application/json",
         }
 
-    async def get_by_doi(self, doi: str) -> Optional[AcademicWork]:
+    async def get_by_doi(self, doi: str, client: Optional[httpx.AsyncClient] = None) -> Optional[AcademicWork]:
         """Fetch publication by DOI."""
         clean_doi = doi.strip().replace("https://doi.org/", "").replace("http://dx.doi.org/", "")
         query = f'DOI:"{clean_doi}"'
@@ -34,18 +35,26 @@ class EuropePMCClient:
             "resultType": "core",
             "pageSize": 1,
         }
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(EUROPE_PMC_BASE_URL, headers=self.headers, params=params)
+            if response.status_code == 200:
+                results = response.json().get("resultList", {}).get("result", [])
+                if results:
+                    return self._parse_result(results[0], fallback_doi=clean_doi)
+            return None
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(EUROPE_PMC_BASE_URL, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    results = response.json().get("resultList", {}).get("result", [])
-                    if results:
-                        return self._parse_result(results[0], fallback_doi=clean_doi)
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying Europe PMC for DOI %s: %s", clean_doi, e)
         return None
 
-    async def search_by_title(self, title: str) -> List[AcademicWork]:
+    async def search_by_title(self, title: str, client: Optional[httpx.AsyncClient] = None) -> List[AcademicWork]:
         """Search Europe PMC by title."""
         query = f'TITLE:"{title}"'
         params = {
@@ -54,12 +63,20 @@ class EuropePMCClient:
             "resultType": "core",
             "pageSize": 3,
         }
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(EUROPE_PMC_BASE_URL, headers=self.headers, params=params)
+            if response.status_code == 200:
+                results = response.json().get("resultList", {}).get("result", [])
+                return [self._parse_result(r) for r in results if r]
+            return []
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(EUROPE_PMC_BASE_URL, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    results = response.json().get("resultList", {}).get("result", [])
-                    return [self._parse_result(r) for r in results if r]
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying Europe PMC search for '%s': %s", title, e)
         return []

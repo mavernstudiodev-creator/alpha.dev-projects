@@ -1,6 +1,7 @@
 """
 OpenAlex API Integration Client
 Retrieves publication metadata, open-access status, direct PDF locations, and reconstructed abstracts.
+Supports connection-pooled reusable HTTP clients.
 """
 
 import logging
@@ -24,23 +25,36 @@ class OpenAlexClient:
             "Accept": "application/json",
         }
 
-    async def get_by_doi(self, doi: str) -> Optional[AcademicWork]:
+    async def get_by_doi(self, doi: str, client: Optional[httpx.AsyncClient] = None) -> Optional[AcademicWork]:
         """Fetch metadata by exact DOI."""
         clean_doi = doi.strip().replace("https://doi.org/", "").replace("http://dx.doi.org/", "")
         url = f"{OPENALEX_BASE_URL}/https://doi.org/{clean_doi}"
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(url, headers=self.headers)
+            if response.status_code == 200:
+                data = response.json()
+                return self._parse_work(data)
+            elif response.status_code == 404:
+                logger.info("DOI not found in OpenAlex: %s", clean_doi)
+            return None
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, headers=self.headers)
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._parse_work(data)
-                elif response.status_code == 404:
-                    logger.info("DOI not found in OpenAlex: %s", clean_doi)
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying OpenAlex by DOI %s: %s", clean_doi, e)
         return None
 
-    async def search_by_title(self, title: str, year: Optional[int] = None) -> List[AcademicWork]:
+    async def search_by_title(
+        self,
+        title: str,
+        year: Optional[int] = None,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> List[AcademicWork]:
         """Search OpenAlex by title query."""
         params: Dict[str, Any] = {
             "search": title,
@@ -49,12 +63,19 @@ class OpenAlexClient:
         if year:
             params["filter"] = f"publication_year:{year}"
 
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(OPENALEX_BASE_URL, headers=self.headers, params=params)
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                return [self._parse_work(r) for r in results if r]
+            return []
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(OPENALEX_BASE_URL, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    return [self._parse_work(r) for r in results if r]
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying OpenAlex for title '%s': %s", title, e)
         return []

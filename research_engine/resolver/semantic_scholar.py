@@ -1,6 +1,7 @@
 """
 Semantic Scholar Graph API Integration Client
 Retrieves academic publications, open access PDFs, citations, and abstracts.
+Supports connection-pooled reusable HTTP clients.
 """
 
 import logging
@@ -27,25 +28,33 @@ class SemanticScholarClient:
         if api_key:
             self.headers["x-api-key"] = api_key
 
-    async def get_by_doi(self, doi: str) -> Optional[AcademicWork]:
+    async def get_by_doi(self, doi: str, client: Optional[httpx.AsyncClient] = None) -> Optional[AcademicWork]:
         """Fetch metadata by DOI using Semantic Scholar."""
         clean_doi = doi.strip().replace("https://doi.org/", "").replace("http://dx.doi.org/", "")
         paper_id = f"DOI:{clean_doi}"
         url = f"{SEMANTIC_SCHOLAR_BASE_URL}/paper/{paper_id}"
         params = {"fields": FIELDS}
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(url, headers=self.headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                return self._parse_paper(data, fallback_doi=clean_doi)
+            elif response.status_code == 404:
+                logger.info("Paper not found in Semantic Scholar: %s", paper_id)
+            return None
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._parse_paper(data, fallback_doi=clean_doi)
-                elif response.status_code == 404:
-                    logger.info("Paper not found in Semantic Scholar: %s", paper_id)
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying Semantic Scholar by DOI %s: %s", clean_doi, e)
         return None
 
-    async def search_by_title(self, title: str) -> List[AcademicWork]:
+    async def search_by_title(self, title: str, client: Optional[httpx.AsyncClient] = None) -> List[AcademicWork]:
         """Search Semantic Scholar by paper title."""
         url = f"{SEMANTIC_SCHOLAR_BASE_URL}/paper/search"
         params = {
@@ -53,12 +62,20 @@ class SemanticScholarClient:
             "limit": 3,
             "fields": FIELDS,
         }
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(url, headers=self.headers, params=params)
+            if response.status_code == 200:
+                data = response.json().get("data", [])
+                return [self._parse_paper(item) for item in data if item]
+            return []
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    data = response.json().get("data", [])
-                    return [self._parse_paper(item) for item in data if item]
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying Semantic Scholar search for '%s': %s", title, e)
         return []

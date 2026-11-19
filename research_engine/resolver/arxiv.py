@@ -1,6 +1,7 @@
 """
 arXiv API Integration Client
 Retrieves preprints, open-access PDFs, abstracts and metadata from arXiv.
+Supports connection-pooled reusable HTTP clients.
 """
 
 import logging
@@ -25,22 +26,30 @@ class ArxivClient:
             "User-Agent": USER_AGENT,
         }
 
-    async def get_by_arxiv_id(self, arxiv_id: str) -> Optional[AcademicWork]:
+    async def get_by_arxiv_id(self, arxiv_id: str, client: Optional[httpx.AsyncClient] = None) -> Optional[AcademicWork]:
         """Fetch metadata by clean arXiv ID (e.g. 1706.03762)."""
         clean_id = arxiv_id.strip().lower().replace("arxiv:", "").replace("abs/", "").replace("pdf/", "").replace(".pdf", "")
         params = {"id_list": clean_id, "max_results": 1}
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(ARXIV_BASE_URL, headers=self.headers, params=params)
+            if response.status_code == 200:
+                works = self._parse_feed(response.text)
+                if works:
+                    return works[0]
+            return None
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(ARXIV_BASE_URL, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    works = self._parse_feed(response.text)
-                    if works:
-                        return works[0]
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying arXiv for ID %s: %s", clean_id, e)
         return None
 
-    async def search_by_title(self, title: str) -> List[AcademicWork]:
+    async def search_by_title(self, title: str, client: Optional[httpx.AsyncClient] = None) -> List[AcademicWork]:
         """Search arXiv by paper title."""
         clean_title = "".join(c for c in title if c.isalnum() or c.isspace()).strip()
         params = {
@@ -48,11 +57,19 @@ class ArxivClient:
             "max_results": 3,
             "sortBy": "relevance",
         }
+
+        async def _execute(http_c: httpx.AsyncClient):
+            response = await http_c.get(ARXIV_BASE_URL, headers=self.headers, params=params)
+            if response.status_code == 200:
+                return self._parse_feed(response.text)
+            return []
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(ARXIV_BASE_URL, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    return self._parse_feed(response.text)
+            if client is not None:
+                return await _execute(client)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as local_c:
+                    return await _execute(local_c)
         except Exception as e:
             logger.error("Error querying arXiv search for title '%s': %s", title, e)
         return []

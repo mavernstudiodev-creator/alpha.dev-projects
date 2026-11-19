@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["*"]
 
+    # HTTP Client Pool Configuration
+    HTTP_MAX_CONNECTIONS: int = 50
+    HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 20
+    HTTP_KEEPALIVE_EXPIRY: float = 30.0
+    HTTP_DEFAULT_TIMEOUT: float = 12.0
+    PDF_CACHE_MAX_ENTRIES: int = 50
+
     class Config:
         case_sensitive = True
 

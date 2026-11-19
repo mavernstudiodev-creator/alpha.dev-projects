@@ -5,9 +5,11 @@ Document Upload and Retrieval Endpoints
 import os
 import json
 import uuid
+import time
+import logging
 import aiofiles
 from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -16,12 +18,15 @@ from app.core.config import settings
 from app.models.db_models import DocumentDB
 from research_engine.pipeline import VerificationPipeline, DocumentVerificationReport
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/documents", tags=["documents"])
 pipeline = VerificationPipeline()
 
 
 @router.post("/upload", response_model=DocumentVerificationReport)
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
@@ -29,6 +34,7 @@ async def upload_document(
     Upload an academic research PDF, extract claims & citations,
     resolve against academic databases, harvest evidence, and return verification report.
     """
+    upload_start = time.perf_counter()
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -44,8 +50,9 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {str(e)}")
 
     try:
-        # Run verification pipeline
-        report = await pipeline.process_pdf(dest_path, document_id=doc_id)
+        # Run verification pipeline reusing pooled HTTP client if present on app.state
+        shared_client = getattr(request.app.state, "http_client", None)
+        report = await pipeline.process_pdf(dest_path, document_id=doc_id, http_client=shared_client)
 
         # Store in database
         doc_record = DocumentDB(
@@ -58,6 +65,14 @@ async def upload_document(
         )
         db.add(doc_record)
         db.commit()
+
+        upload_duration = time.perf_counter() - upload_start
+        logger.info(
+            "[%s] Total upload request processed in %.2f s (%.2f ms)",
+            doc_id,
+            upload_duration,
+            upload_duration * 1000,
+        )
 
         return report
 
