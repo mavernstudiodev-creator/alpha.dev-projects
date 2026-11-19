@@ -4,6 +4,8 @@ Integrates NVIDIA NIM / Nemotron (e.g. nvidia/llama-3.1-nemotron-70b-instruct)
 with grounded RAG context from verified academic PDFs and research evidence.
 """
 
+from __future__ import annotations
+
 import os
 import json
 import uuid
@@ -630,3 +632,4 @@ class TupleContext:
     def __init__(self, context_str: str, sources: List[Dict[str, Any]]):
         self.context_str = context_str
         self.sources = sources
+
