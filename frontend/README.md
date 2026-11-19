@@ -1,4 +1,4 @@
-# CiteVerify — Frontend Application Template
+# CiteVerify — React Frontend
 
 CiteVerify is a scientific claim and citation verification platform designed for research integrity officers, journal editors, peer reviewers, and metascience auditors.
 
@@ -20,10 +20,11 @@ Adapted from premium biotech and health technology design aesthetics:
 | Page | Route | Description |
 |---|---|---|
 | **Landing Page** | `/` | Hero section, 4-step workflow, 6-verdict feature breakdown, scholarly resolver integrations, limitations, and footer. |
-| **Sign In** | `/login` | Institutional email login, password show/hide toggle, frontend validation, and 1-click Auto-Fill Demo button. |
-| **Registration** | `/register` | Institutional registration form with name, university/org, academic role, email, password strength, and code of conduct. |
+| **Sign In** | `/login` | Open-workspace sign-in screen. The current backend does not expose authentication or role-enforcement endpoints. |
+| **Registration** | `/register` | Registration information screen. The current backend does not expose account creation. |
 | **Main Dashboard** | `/dashboard` | Metrics overview cards, Recharts verdict distribution bar chart, literature resolver share pie chart, recent documents, and live audit stream. |
-| **PDF Upload** | `/upload` | Drag-and-drop PDF zone, file format/size validation, animated 5-stage extraction pipeline, and 1-click demo preprint testers. |
+| **PDF Upload** | `/upload` | Drag-and-drop PDF upload to the FastAPI background verification job, with real processing progress and error states. |
+| **Research Assistant** | `/assistant` | NVIDIA-backed grounded chat, document selection, conversation history, and cited evidence sources. |
 | **Verification Results** | `/documents/:docId` | Document summary, 6-verdict statistics chips, interactive claims filtering and search, claim cards, and resolved bibliography tab. |
 | **Claim Details** | `/documents/:docId/claims/:claimId` | Verbatim proposition, concordance meter, rationale explanation, literature revision alerts, linked citation callouts, and harvested evidence excerpts. |
 | **Human Review** | `/documents/:docId/review` | Auditor inspection queue, side-by-side claim vs ground-truth comparison, interactive decision form (Confirm, Override, Flag), and document audit history. |
